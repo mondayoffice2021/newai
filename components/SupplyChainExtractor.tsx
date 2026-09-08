@@ -23,6 +23,7 @@ import StopIcon from './icons/StopIcon';
 import DocumentArrowUpIcon from './icons/DocumentArrowUpIcon';
 import CheckIcon from './icons/CheckIcon';
 import FunnelIcon from './icons/FunnelIcon';
+import { useActiveWakeLock } from '../hooks/useWakeLock';
 
 interface SupplyChainExtractorProps {
   showToast: (msg: string) => void;
@@ -46,6 +47,10 @@ const SupplyChainExtractor: React.FC<SupplyChainExtractorProps> = ({ showToast }
   const [batchResults, setBatchResults] = useState<SupplyChainContact[]>([]);
   const [batchLoadingIndex, setBatchLoadingIndex] = useState<number>(-1);
   const [batchStatus, setBatchStatus] = useState<'idle' | 'running' | 'paused' | 'stopped' | 'completed'>('idle');
+
+  // Keep screen awake while researching supply chain contacts
+  const isWorking = loading || batchStatus === 'running' || Boolean(researchingDistributors);
+  useActiveWakeLock(isWorking, 'Supply Chain: Researching Contacts');
 
   const batchFileRef = useRef<HTMLInputElement>(null);
   const stopBatchRef = useRef<boolean>(false);

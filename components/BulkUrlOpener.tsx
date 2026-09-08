@@ -9,6 +9,7 @@ import XCircleIcon from './icons/XCircleIcon';
 import PlayIcon from './icons/PlayIcon';
 import StopIcon from './icons/StopIcon';
 import { isPublicDomain } from '../constants/domains';
+import { useActiveWakeLock } from '../hooks/useWakeLock';
 
 interface BulkUrlOpenerProps {
   showToast: (message: string) => void;
@@ -29,6 +30,9 @@ export const BulkUrlOpener: React.FC<BulkUrlOpenerProps> = ({ showToast }) => {
   const [excludePublicWebmail, setExcludePublicWebmail] = useState<boolean>(true);
   const [delayBetweenTabs, setDelayBetweenTabs] = useState<number>(150); // ms delay to prevent browser crash
   const [isOpening, setIsOpening] = useState<boolean>(false);
+
+  // Keep screen awake while batch URLs are being opened
+  useActiveWakeLock(isOpening, 'Bulk URL Opener: Launching Targets');
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [popupBlockedWarning, setPopupBlockedWarning] = useState<boolean>(false);
   const [searchQuery, setSearchQuery] = useState<string>('');

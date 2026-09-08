@@ -7,6 +7,7 @@ import CheckIcon from './icons/CheckIcon';
 import XCircleIcon from './icons/XCircleIcon';
 import TrashIcon from './icons/XCircleIcon'; // We can reuse XCircleIcon or make a clean close/delete action
 import ArrowPathIcon from './icons/ArrowPathIcon';
+import { useActiveWakeLock } from '../hooks/useWakeLock';
 
 interface FolderExtractorProps {
   showToast: (msg: string) => void;
@@ -33,6 +34,9 @@ export const FolderExtractor: React.FC<FolderExtractorProps> = ({ showToast, onS
   const [processedFiles, setProcessedFiles] = useState<ProcessedFile[]>([]);
   const [extractedEmails, setExtractedEmails] = useState<ExtractedEmailItem[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
+
+  // Keep screen awake while files are being uploaded, parsed, and extracted
+  useActiveWakeLock(isProcessing, 'Folder Extractor: Processing Files & Archives');
   const [isDragging, setIsDragging] = useState(false);
   const [progress, setProgress] = useState<{ current: number; total: number } | null>(null);
   const [statusText, setStatusText] = useState('Idle');

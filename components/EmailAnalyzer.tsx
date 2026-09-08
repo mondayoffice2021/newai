@@ -21,6 +21,7 @@ import FunnelIcon from './icons/FunnelIcon';
 import ToggleSwitch from './ToggleSwitch';
 import JSZip from 'jszip';
 import { isPublicDomain } from '../constants/domains';
+import { useActiveWakeLock } from '../hooks/useWakeLock';
 
 interface EmailAnalyzerProps {
   showToast: (msg: string) => void;
@@ -36,6 +37,9 @@ const EmailAnalyzer: React.FC<EmailAnalyzerProps> = ({ showToast }) => {
   const [analyzedResults, setAnalyzedResults] = useState<AnalyzedGroup[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
+
+  // Keep screen awake while industry batch analysis is executing
+  useActiveWakeLock(isProcessing, 'Industry Analyzer: Categorizing Companies');
   const [progress, setProgress] = useState<{ current: number; total: number } | null>(null);
   const [statusText, setStatusText] = useState<string>('Initializing...');
   const [ignoredCount, setIgnoredCount] = useState<number>(0);

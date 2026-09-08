@@ -21,6 +21,7 @@ import XCircleIcon from './icons/XCircleIcon';
 import CheckIcon from './icons/CheckIcon';
 import JSZip from 'jszip';
 import ToggleSwitch from './ToggleSwitch';
+import { useActiveWakeLock } from '../hooks/useWakeLock';
 
 interface EmailSorterProps {
   showToast: (msg: string) => void;
@@ -36,6 +37,9 @@ const EmailSorter: React.FC<EmailSorterProps> = ({ showToast }) => {
   const [sortedResults, setSortedResults] = useState<SortedGroup[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
+
+  // Keep screen awake while country sorting and business filtering are in progress
+  useActiveWakeLock(isProcessing, 'Country Sorter: Sorting & Filtering');
   const [progress, setProgress] = useState<{ current: number; total: number } | null>(null);
   const [statusText, setStatusText] = useState<string>('Initializing...');
   const [largeFileMode, setLargeFileMode] = useState(false);

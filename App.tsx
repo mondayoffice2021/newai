@@ -30,6 +30,8 @@ import ArrowsRightLeftIcon from './components/icons/ArrowsRightLeftIcon';
 import GlobeAltIcon from './components/icons/GlobeAltIcon';
 import CheckIcon from './components/icons/CheckIcon';
 import ClipboardIcon from './components/icons/ClipboardIcon';
+import { ScreenWakeLockIndicator } from './components/ScreenWakeLockIndicator';
+import { useActiveWakeLock } from './hooks/useWakeLock';
 
 
 const App: React.FC = () => {
@@ -44,6 +46,9 @@ const App: React.FC = () => {
   const [urls, setUrls] = useState<string>('');
   const [results, setResults] = useState<ExtractedEmail[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
+
+  // Keep screen awake automatically while searching/extracting
+  useActiveWakeLock(isLoading, 'Targeted Extractor: Crawling Web Dorks');
   const [isSuggesting, setIsSuggesting] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [isDeepSearch, setIsDeepSearch] = useState<boolean>(false);
@@ -724,10 +729,11 @@ const App: React.FC = () => {
       <div className="min-h-screen w-full bg-gray-900 text-white p-4 sm:p-6 lg:p-8 font-sans">
         <div className="max-w-[98%] mx-auto">
           <header className="text-center mb-8 relative">
-            <div className="absolute right-0 top-0">
+            <div className="absolute right-0 top-0 flex items-center gap-2">
+                <ScreenWakeLockIndicator showToast={showToast} />
                 <button 
                     onClick={() => setIsSettingsOpen(true)}
-                    className="p-2 rounded-full text-gray-400 hover:text-white hover:bg-gray-800 transition"
+                    className="p-2 rounded-full text-gray-400 hover:text-white hover:bg-gray-800 transition border border-transparent hover:border-gray-700"
                     title="Settings"
                 >
                     <Cog6ToothIcon className="w-6 h-6" />

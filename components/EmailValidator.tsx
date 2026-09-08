@@ -16,6 +16,7 @@ import SparklesIcon from './icons/SparklesIcon';
 import ToggleSwitch from './ToggleSwitch';
 import JSZip from 'jszip';
 import { isPublicDomain } from '../constants/domains';
+import { useActiveWakeLock } from '../hooks/useWakeLock';
 
 interface EmailValidatorProps {
   showToast: (msg: string) => void;
@@ -74,6 +75,9 @@ const EmailValidator: React.FC<EmailValidatorProps> = ({ showToast, initialEmail
   // Verification pipeline options
   const [isProcessing, setIsProcessing] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
+
+  // Keep screen awake while email verification, DNS resolution, and SMTP handshake are active
+  useActiveWakeLock(isProcessing, 'Sorter & Validator: Verifying Mailboxes');
   const [useOnlineMode, setUseOnlineMode] = useState(false);
   const [useDNSCheck, setUseDNSCheck] = useState(true); // Active MX check is priority
   const [useSMTPCheck, setUseSMTPCheck] = useState(true); // Deep handshake verification

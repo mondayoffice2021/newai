@@ -7,6 +7,7 @@ import PauseIcon from './icons/PauseIcon';
 import PlayIcon from './icons/PlayIcon';
 import StopIcon from './icons/StopIcon';
 import JSZip from 'jszip';
+import { useActiveWakeLock } from '../hooks/useWakeLock';
 
 interface MXSorterProps {
   showToast: (msg: string) => void;
@@ -36,6 +37,9 @@ const MXSorter: React.FC<MXSorterProps> = ({ showToast }) => {
   const [results, setResults] = useState<MXGroup[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
+
+  // Keep screen awake while resolving MX DNS queries and sorting
+  useActiveWakeLock(isProcessing, 'MX Sorter: Resolving DNS Records');
   const [progress, setProgress] = useState<{ current: number; total: number } | null>(null);
   const [statusText, setStatusText] = useState('Idle');
   
