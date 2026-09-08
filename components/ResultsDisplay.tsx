@@ -6,6 +6,7 @@ import SparklesIcon from './icons/SparklesIcon';
 import MagnifyingGlassIcon from './icons/MagnifyingGlassIcon';
 import XCircleIcon from './icons/XCircleIcon';
 import LinkIcon from './icons/LinkIcon';
+import ShieldCheckIcon from './icons/ShieldCheckIcon';
 
 interface ResultsDisplayProps {
   results: ExtractedEmail[];
@@ -15,6 +16,7 @@ interface ResultsDisplayProps {
   onClearResults: () => void;
   onDeduplicateCompanies?: () => void;
   avoidDuplicateCompanies?: boolean;
+  onSendToValidator?: () => void;
 }
 
 const CopyButton: React.FC<{ textToCopy: string }> = ({ textToCopy }) => {
@@ -61,7 +63,8 @@ const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
   progressMessage, 
   onClearResults,
   onDeduplicateCompanies,
-  avoidDuplicateCompanies = true
+  avoidDuplicateCompanies = true,
+  onSendToValidator
 }) => {
   const [allCopied, setAllCopied] = useState(false);
   const [companyFilter, setCompanyFilter] = useState('');
@@ -280,6 +283,16 @@ const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
           </div>
           {results.length > 0 && (
             <div className="flex items-center gap-2 flex-shrink-0 flex-wrap">
+              {onSendToValidator && (
+                <button 
+                  onClick={onSendToValidator} 
+                  className="flex items-center px-3 py-1.5 text-xs font-bold uppercase tracking-wider rounded-md bg-orange-600/30 hover:bg-orange-600 text-orange-200 hover:text-white transition-all duration-200 border border-orange-500/50 shadow-sm"
+                  title="Transfer all extracted emails directly to Sorter & Validator for MX verification"
+                >
+                  <ShieldCheckIcon className="w-4 h-4 mr-1.5 text-orange-400" />
+                  Validate & Sort ({filteredResults.length})
+                </button>
+              )}
               {onDeduplicateCompanies && (
                 <button 
                   onClick={onDeduplicateCompanies} 

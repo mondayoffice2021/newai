@@ -10,6 +10,7 @@ import ArrowPathIcon from './icons/ArrowPathIcon';
 
 interface FolderExtractorProps {
   showToast: (msg: string) => void;
+  onSendToValidator?: (emails: string[]) => void;
 }
 
 interface ProcessedFile {
@@ -28,7 +29,7 @@ interface ExtractedEmailItem {
   sourceFiles: string[];
 }
 
-export const FolderExtractor: React.FC<FolderExtractorProps> = ({ showToast }) => {
+export const FolderExtractor: React.FC<FolderExtractorProps> = ({ showToast, onSendToValidator }) => {
   const [processedFiles, setProcessedFiles] = useState<ProcessedFile[]>([]);
   const [extractedEmails, setExtractedEmails] = useState<ExtractedEmailItem[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -476,6 +477,16 @@ export const FolderExtractor: React.FC<FolderExtractorProps> = ({ showToast }) =
 
               {/* Download Buttons */}
               <div className="flex flex-wrap gap-2 shrink-0">
+                {onSendToValidator && (
+                  <button
+                    onClick={() => onSendToValidator(extractedEmails.map(e => e.email))}
+                    disabled={extractedEmails.length === 0}
+                    className="px-3 py-1.5 bg-orange-600/30 hover:bg-orange-600 text-orange-200 hover:text-white rounded-lg text-xs font-bold transition-all flex items-center border border-orange-500/50 disabled:opacity-40"
+                    title="Send extracted emails to Sorter & Validator"
+                  >
+                    Validate & Sort ({extractedEmails.length})
+                  </button>
+                )}
                 <button
                   onClick={copyToClipboard}
                   disabled={extractedEmails.length === 0}

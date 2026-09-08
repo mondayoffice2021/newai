@@ -395,16 +395,35 @@ const App: React.FC = () => {
   const isKeywordMode = !isUrlMode && !sourceEmail;
   const isSimilarMode = !isUrlMode && !!sourceEmail && keywords.trim().length === 0; 
 
+  const [validatorInitialEmails, setValidatorInitialEmails] = useState<string[]>([]);
+
+  const handleSendToValidator = (customList?: string[]) => {
+    const list = customList && customList.length > 0 ? customList : results.map(r => r.email).filter(Boolean);
+    if (list.length === 0) {
+      showToast("No extracted emails available to validate.");
+      return;
+    }
+    const unique = Array.from(new Set(list));
+    setValidatorInitialEmails(unique);
+    setActiveTab('validator');
+    showToast(`Transferred ${unique.length} extracted emails to Sorter & Validator!`);
+  };
+
   const renderContent = () => {
       switch(activeTab) {
           case 'bulk-extractor':
-              return <FolderExtractor showToast={showToast} />;
+              return <FolderExtractor showToast={showToast} onSendToValidator={handleSendToValidator} />;
           case 'sorter':
               return <EmailSorter showToast={showToast} />;
           case 'analyzer':
               return <EmailAnalyzer showToast={showToast} />;
           case 'validator':
-              return <EmailValidator showToast={showToast} />;
+              return (
+                <EmailValidator 
+                  showToast={showToast} 
+                  initialEmails={validatorInitialEmails.length > 0 ? validatorInitialEmails : results.map(r => r.email).filter(Boolean)} 
+                />
+              );
           case 'mx-sorter':
               return <MXSorter showToast={showToast} />;
           case 'supply-chain':
@@ -682,6 +701,7 @@ const App: React.FC = () => {
                       onClearResults={handleClear} 
                       onDeduplicateCompanies={handleDeduplicateCompanies}
                       avoidDuplicateCompanies={avoidDuplicateCompanies}
+                      onSendToValidator={() => handleSendToValidator()}
                     />
                   </div>
                 </div>
