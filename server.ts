@@ -3,6 +3,7 @@ import path from "path";
 import net from "net";
 import dns from "dns";
 import { promisify } from "util";
+import { enrichDomainsIntelligence } from "./services/domainEnricher";
 
 const resolveMx = promisify(dns.resolveMx);
 
@@ -509,6 +510,23 @@ async function startServer() {
         } catch {}
       }
       res.json({ status: "valid", detail: `Active MX check ok: Good` });
+    }
+  });
+
+  // Live Domain Website & Search Intelligence Endpoint
+  app.post("/api/domain-intelligence", async (req, res) => {
+    const { domains } = req.body;
+    if (!Array.isArray(domains) || domains.length === 0) {
+      return res.status(400).json({ error: "Domains array required" });
+    }
+
+    try {
+      console.log(`[Domain Intelligence API] Request for ${domains.length} domains`);
+      const results = await enrichDomainsIntelligence(domains);
+      res.json({ results });
+    } catch (err: any) {
+      console.error("[Domain Intelligence API] Error:", err?.message || err);
+      res.status(500).json({ error: "Failed to enrich domain intelligence", details: err?.message });
     }
   });
 
