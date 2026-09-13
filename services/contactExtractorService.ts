@@ -1,6 +1,14 @@
 import * as XLSX from 'xlsx';
 
 export type ContactType = 'email' | 'phone' | 'webmail' | 'website';
+export type MXStatus = 'unchecked' | 'checking' | 'valid' | 'invalid';
+
+export interface MXCheckResult {
+  hasMx: boolean;
+  provider: string;
+  servers: string[];
+  diagnostic: string;
+}
 
 export interface ExtractedContactItem {
   id: string;
@@ -11,6 +19,10 @@ export interface ExtractedContactItem {
   source: string;
   domain?: string;
   country?: string;
+  mxStatus?: MXStatus;
+  mxProvider?: string;
+  mxServers?: string[];
+  mxDiagnostic?: string;
 }
 
 export interface ContactExtractionFilterOptions {
@@ -20,7 +32,128 @@ export interface ContactExtractionFilterOptions {
   webmailOnly?: boolean;
   deduplicate?: boolean;
   countryHint?: string;
+  autoCheckMX?: boolean;
 }
+
+// Enterprise & Global MX Pattern Definitions
+const MX_PROVIDER_PATTERNS: [string, string[]][] = [
+  ['Google Workspace', ['google.com', 'googlemail.com', 'aspmx.l.google.com', 'l.google.com']],
+  ['Microsoft 365', ['outlook.com', 'protection.outlook.com', 'hotmail.com', 'microsoft.com', 'office365.com', 'mail.protection.outlook.com']],
+  ['Zoho Mail', ['zoho.com', 'zoho.eu', 'zoho.in']],
+  ['Mimecast', ['mimecast.com']],
+  ['Proofpoint', ['pphosted.com', 'ppe-hosted.com', 'proofpoint.com']],
+  ['ProtonMail', ['protonmail.ch', 'proton.me']],
+  ['Fastmail', ['fastmail.com', 'messagingengine.com']],
+  ['GoDaddy', ['secureserver.net']],
+  ['Namecheap / PrivateEmail', ['registrar-servers.com', 'privateemail.com', 'oxcs.net']],
+  ['Amazon SES / WorkMail', ['amazonses.com', 'awsapps.com']],
+  ['OVHcloud', ['ovh.net', 'ovh.com', 'ovh.ca']],
+  ['Rackspace', ['emailsrvr.com']],
+  ['Yandex', ['yandex.net', 'yandex.com', 'yandex.ru']],
+  ['Mailgun', ['mailgun.org', 'mailgun.com']],
+  ['SendGrid', ['sendgrid.net']],
+  ['Brevo / Sendinblue', ['sendinblue.com', 'brevo.com']],
+  ['Cisco IronPort', ['iphmx.com', 'ironport.com']],
+  ['Barracuda', ['barracudanetworks.com', 'ess.barracuda.com']],
+  ['Apple iCloud', ['icloud.com', 'apple.com']]
+];
+
+/**
+ * Check MX DNS records for a given domain via DNS-over-HTTPS (Google & Cloudflare fallback)
+ */
+export const checkDomainMX = async (
+  domain: string,
+  cache?: Map<string, MXCheckResult>
+): Promise<MXCheckResult> => {
+  if (!domain) {
+    return { hasMx: false, provider: 'Unknown', servers: [], diagnostic: 'No domain specified' };
+  }
+
+  const cleanDomain = domain.toLowerCase().trim();
+  if (cache && cache.has(cleanDomain)) {
+    return cache.get(cleanDomain)!;
+  }
+
+  try {
+    let data: any = null;
+
+    // 1. Primary: Google DNS-over-HTTPS
+    try {
+      const response = await fetch(`https://dns.google/resolve?name=${encodeURIComponent(cleanDomain)}&type=MX`);
+      if (response.ok) {
+        data = await response.json();
+      }
+    } catch {
+      // 2. Fallback: Cloudflare DNS-over-HTTPS
+      try {
+        const cfResponse = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(cleanDomain)}&type=MX`, {
+          headers: { 'Accept': 'application/dns-json' }
+        });
+        if (cfResponse.ok) {
+          data = await cfResponse.json();
+        }
+      } catch {
+        // Fallback failed
+      }
+    }
+
+    if (data && Array.isArray(data.Answer) && data.Answer.length > 0) {
+      const servers: string[] = data.Answer
+        .map((ans: any) => (ans.data || '').toLowerCase())
+        .filter(Boolean);
+
+      let detectedProvider = 'Custom / Private MX';
+      for (const [provider, patterns] of MX_PROVIDER_PATTERNS) {
+        if (servers.some(srv => patterns.some(pat => srv.includes(pat)))) {
+          detectedProvider = provider;
+          break;
+        }
+      }
+
+      const result: MXCheckResult = {
+        hasMx: true,
+        provider: detectedProvider,
+        servers,
+        diagnostic: `Active MX (${detectedProvider})`
+      };
+
+      if (cache) cache.set(cleanDomain, result);
+      return result;
+    }
+
+    // If no MX records, check if the domain has an A record (active website without mail server vs completely dead domain)
+    let hasA = false;
+    try {
+      const aResponse = await fetch(`https://dns.google/resolve?name=${encodeURIComponent(cleanDomain)}&type=A`);
+      if (aResponse.ok) {
+        const aData = await aResponse.json();
+        hasA = !!(aData && Array.isArray(aData.Answer) && aData.Answer.length > 0);
+      }
+    } catch {
+      // ignore A check error
+    }
+
+    const result: MXCheckResult = {
+      hasMx: false,
+      provider: hasA ? 'No MX (Web Only)' : 'Dead / Inactive Domain',
+      servers: [],
+      diagnostic: hasA 
+        ? 'Domain resolves web IP (A record), but has no MX email exchange server configured.' 
+        : 'Domain has neither MX nor A DNS records (dead or unregistered).'
+    };
+
+    if (cache) cache.set(cleanDomain, result);
+    return result;
+  } catch (err: any) {
+    const result: MXCheckResult = {
+      hasMx: false,
+      provider: 'DNS Query Failed',
+      servers: [],
+      diagnostic: err?.message || 'DNS request error'
+    };
+    return result;
+  }
+};
 
 /**
  * Robust Email Extractor
@@ -63,7 +196,8 @@ export const extractEmailsFromText = (text: string, source = 'Text'): ExtractedC
         ? 'Business Mail'
         : 'Direct Email',
       source,
-      domain
+      domain,
+      mxStatus: 'unchecked'
     });
   }
 

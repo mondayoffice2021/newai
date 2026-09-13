@@ -3,9 +3,12 @@ import * as XLSX from 'xlsx';
 import {
   extractContactsFromText,
   extractContactsFromFile,
+  checkDomainMX,
   type ExtractedContactItem,
   type ContactExtractionFilterOptions,
-  type ContactType
+  type ContactType,
+  type MXCheckResult,
+  type MXStatus
 } from '../services/contactExtractorService';
 import type { ExtractedEmail } from '../types';
 import {
@@ -22,6 +25,10 @@ import {
   Search,
   ExternalLink,
   ShieldCheck,
+  ShieldAlert,
+  CheckCircle2,
+  XCircle,
+  AlertCircle,
   Send,
   Sparkles,
   Info
@@ -90,7 +97,127 @@ export const FileTextContactExtractor: React.FC<FileTextContactExtractorProps> =
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [allCopied, setAllCopied] = useState<boolean>(false);
 
+  // Quick MX Check State
+  const [autoCheckMX, setAutoCheckMX] = useState<boolean>(true);
+  const [isCheckingMX, setIsCheckingMX] = useState<boolean>(false);
+  const [mxProgress, setMxProgress] = useState<{ current: number; total: number } | null>(null);
+  const domainMXCache = useRef<Map<string, MXCheckResult>>(new Map());
+  const abortMXRef = useRef<boolean>(false);
+
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Perform Quick MX Check on extracted emails
+  const performMXCheck = useCallback(async (
+    targetContacts?: ExtractedContactItem[],
+    forceAll = false
+  ) => {
+    const list = targetContacts || contacts;
+    const emailItems = list.filter(c => c.type === 'email');
+    if (emailItems.length === 0) {
+      if (forceAll) {
+        showToast("No extracted email addresses found to check MX.");
+      }
+      return;
+    }
+
+    const itemsToCheck = forceAll
+      ? emailItems
+      : emailItems.filter(c => !c.mxStatus || c.mxStatus === 'unchecked');
+
+    if (itemsToCheck.length === 0) {
+      if (forceAll) {
+        showToast("All extracted email domains have already been MX verified.");
+      }
+      return;
+    }
+
+    const uniqueDomains = Array.from(
+      new Set(itemsToCheck.map(e => e.domain?.toLowerCase().trim()).filter(Boolean))
+    ) as string[];
+
+    if (uniqueDomains.length === 0) return;
+
+    abortMXRef.current = false;
+    setIsCheckingMX(true);
+    setMxProgress({ current: 0, total: uniqueDomains.length });
+
+    // Mark affected items as 'checking'
+    setContacts(prev => prev.map(item => {
+      if (item.type === 'email' && item.domain && uniqueDomains.includes(item.domain.toLowerCase())) {
+        return { ...item, mxStatus: 'checking' };
+      }
+      return item;
+    }));
+
+    const BATCH_SIZE = 5;
+    let processed = 0;
+    let validCount = 0;
+    let deadCount = 0;
+
+    for (let i = 0; i < uniqueDomains.length; i += BATCH_SIZE) {
+      if (abortMXRef.current) break;
+
+      const batch = uniqueDomains.slice(i, i + BATCH_SIZE);
+      const batchResults = await Promise.all(
+        batch.map(async (domain) => {
+          const res = await checkDomainMX(domain, domainMXCache.current);
+          return { domain, res };
+        })
+      );
+
+      processed += batch.length;
+      setMxProgress({ current: Math.min(processed, uniqueDomains.length), total: uniqueDomains.length });
+
+      // Apply batch results to contacts
+      setContacts(prev => prev.map(item => {
+        if (item.type === 'email' && item.domain) {
+          const match = batchResults.find(b => b.domain.toLowerCase() === item.domain?.toLowerCase());
+          if (match) {
+            if (match.res.hasMx) validCount++;
+            else deadCount++;
+            return {
+              ...item,
+              mxStatus: match.res.hasMx ? 'valid' : 'invalid',
+              mxProvider: match.res.provider,
+              mxDiagnostic: match.res.diagnostic,
+              mxServers: match.res.servers
+            };
+          }
+        }
+        return item;
+      }));
+    }
+
+    setIsCheckingMX(false);
+    setMxProgress(null);
+    if (!abortMXRef.current && forceAll) {
+      showToast(`Quick MX check finished: ${validCount} active MX, ${deadCount} dead/no-MX.`);
+    }
+  }, [contacts, showToast]);
+
+  // Check single email MX
+  const checkSingleEmailMX = async (item: ExtractedContactItem) => {
+    if (item.type !== 'email' || !item.domain) return;
+    const domain = item.domain.toLowerCase();
+
+    setContacts(prev => prev.map(c => c.id === item.id ? { ...c, mxStatus: 'checking' } : c));
+    const res = await checkDomainMX(domain, domainMXCache.current);
+
+    setContacts(prev => prev.map(c => {
+      if (c.type === 'email' && c.domain?.toLowerCase() === domain) {
+        return {
+          ...c,
+          mxStatus: res.hasMx ? 'valid' : 'invalid',
+          mxProvider: res.provider,
+          mxDiagnostic: res.diagnostic,
+          mxServers: res.servers
+        };
+      }
+      return c;
+    }));
+
+    showToast(`MX for ${domain}: ${res.hasMx ? `Active (${res.provider})` : 'Dead / No MX'}`);
+  };
 
   // Re-run extraction whenever checkboxes change or text/files update
   const runExtraction = useCallback(async () => {
@@ -101,6 +228,10 @@ export const FileTextContactExtractor: React.FC<FileTextContactExtractorProps> =
     }
 
     setIsProcessing(true);
+    abortMXRef.current = true;
+    setIsCheckingMX(false);
+    setMxProgress(null);
+
     const filterOptions: ContactExtractionFilterOptions = {
       extractEmail,
       extractPhone,
@@ -134,18 +265,28 @@ export const FileTextContactExtractor: React.FC<FileTextContactExtractorProps> =
         }
       }
 
+      let finalItems: ExtractedContactItem[] = [];
+
       // Final deduplication if requested
       if (deduplicate) {
         const seen = new Set<string>();
-        const unique = allExtracted.filter(item => {
+        finalItems = allExtracted.filter(item => {
           const key = `${item.type}:${item.normalizedValue.toLowerCase()}`;
           if (seen.has(key)) return false;
           seen.add(key);
           return true;
         });
-        setContacts(unique);
       } else {
-        setContacts(allExtracted);
+        finalItems = allExtracted;
+      }
+
+      setContacts(finalItems);
+
+      // Auto MX Check trigger for newly extracted emails
+      if (autoCheckMX && finalItems.some(item => item.type === 'email')) {
+        setTimeout(() => {
+          performMXCheck(finalItems, false);
+        }, 100);
       }
     } catch (err: any) {
       console.error("Extraction error:", err);
@@ -162,6 +303,8 @@ export const FileTextContactExtractor: React.FC<FileTextContactExtractorProps> =
     pastedText,
     selectedFiles,
     fileRawTextCache,
+    autoCheckMX,
+    performMXCheck,
     showToast
   ]);
 
@@ -201,6 +344,9 @@ export const FileTextContactExtractor: React.FC<FileTextContactExtractorProps> =
   };
 
   const handleClearAll = () => {
+    abortMXRef.current = true;
+    setIsCheckingMX(false);
+    setMxProgress(null);
     setPastedText('');
     setSelectedFiles([]);
     setFileRawTextCache({});
@@ -236,6 +382,11 @@ export const FileTextContactExtractor: React.FC<FileTextContactExtractorProps> =
   const websiteCount = useMemo(() => contacts.filter(c => c.type === 'website').length, [contacts]);
   const webTotalCount = webmailCount + websiteCount;
 
+  // MX Check Metrics
+  const validMXCount = useMemo(() => contacts.filter(c => c.type === 'email' && c.mxStatus === 'valid').length, [contacts]);
+  const deadMXCount = useMemo(() => contacts.filter(c => c.type === 'email' && c.mxStatus === 'invalid').length, [contacts]);
+  const uncheckedMXCount = useMemo(() => contacts.filter(c => c.type === 'email' && (!c.mxStatus || c.mxStatus === 'unchecked')).length, [contacts]);
+
   // Filtered Contacts List
   const filteredContacts = useMemo(() => {
     return contacts.filter(item => {
@@ -245,6 +396,8 @@ export const FileTextContactExtractor: React.FC<FileTextContactExtractorProps> =
       if (activeFilterType === 'webmail' && item.type !== 'webmail') return false;
       if (activeFilterType === 'website' && item.type !== 'website') return false;
       if (activeFilterType === 'web' && item.type !== 'webmail' && item.type !== 'website') return false;
+      if (activeFilterType === 'mx-valid' && (item.type !== 'email' || item.mxStatus !== 'valid')) return false;
+      if (activeFilterType === 'mx-invalid' && (item.type !== 'email' || item.mxStatus !== 'invalid')) return false;
 
       // Search filter
       if (searchQuery.trim()) {
@@ -253,13 +406,38 @@ export const FileTextContactExtractor: React.FC<FileTextContactExtractorProps> =
           item.value.toLowerCase().includes(q) ||
           item.category.toLowerCase().includes(q) ||
           item.source.toLowerCase().includes(q) ||
-          (item.domain && item.domain.toLowerCase().includes(q))
+          (item.domain && item.domain.toLowerCase().includes(q)) ||
+          (item.mxProvider && item.mxProvider.toLowerCase().includes(q))
         );
       }
 
       return true;
     });
   }, [contacts, activeFilterType, searchQuery]);
+
+  // Purge emails with dead / no MX records
+  const handlePurgeDeadMX = () => {
+    const deadEmails = contacts.filter(c => c.type === 'email' && c.mxStatus === 'invalid');
+    if (deadEmails.length === 0) {
+      showToast("No dead or unreachable MX emails found to remove.");
+      return;
+    }
+    setContacts(prev => prev.filter(c => !(c.type === 'email' && c.mxStatus === 'invalid')));
+    showToast(`Purged ${deadEmails.length} dead/unreachable email(s).`);
+  };
+
+  // Copy Valid MX Emails
+  const handleCopyValidMX = () => {
+    const validEmails = contacts.filter(c => c.type === 'email' && c.mxStatus === 'valid');
+    if (validEmails.length === 0) {
+      showToast("No verified active MX emails found to copy.");
+      return;
+    }
+    navigator.clipboard.writeText(validEmails.map(c => c.value).join('\n'));
+    setAllCopied(true);
+    setTimeout(() => setAllCopied(false), 2000);
+    showToast(`Copied ${validEmails.length} verified active MX emails!`);
+  };
 
   // Copy Single
   const handleCopySingle = (item: ExtractedContactItem) => {
@@ -303,6 +481,9 @@ export const FileTextContactExtractor: React.FC<FileTextContactExtractorProps> =
       Contact: c.value,
       Normalized: c.normalizedValue,
       Category: c.category,
+      'MX Status': c.type === 'email' ? (c.mxStatus === 'valid' ? 'Active MX' : c.mxStatus === 'invalid' ? 'Dead / No MX' : 'Unchecked') : 'N/A',
+      'MX Provider': c.mxProvider || '',
+      'MX Diagnostic': c.mxDiagnostic || '',
       Domain: c.domain || '',
       Source: c.source
     }));
@@ -321,12 +502,14 @@ export const FileTextContactExtractor: React.FC<FileTextContactExtractorProps> =
       return;
     }
 
-    const headers = ['Type', 'Contact', 'Normalized', 'Category', 'Domain', 'Source'];
+    const headers = ['Type', 'Contact', 'Normalized', 'Category', 'MX Status', 'MX Provider', 'Domain', 'Source'];
     const rows = contacts.map(c => [
       c.type,
       `"${c.value.replace(/"/g, '""')}"`,
       `"${c.normalizedValue.replace(/"/g, '""')}"`,
       `"${c.category.replace(/"/g, '""')}"`,
+      `"${c.type === 'email' ? (c.mxStatus === 'valid' ? 'Active MX' : c.mxStatus === 'invalid' ? 'Dead / No MX' : 'Unchecked') : 'N/A'}"`,
+      `"${(c.mxProvider || '').replace(/"/g, '""')}"`,
       `"${(c.domain || '').replace(/"/g, '""')}"`,
       `"${c.source.replace(/"/g, '""')}"`
     ]);
@@ -533,8 +716,30 @@ export const FileTextContactExtractor: React.FC<FileTextContactExtractorProps> =
             )}
           </div>
 
-          <div className="flex items-center gap-3">
-            <label className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer">
+          <div className="flex items-center gap-3 flex-wrap">
+            <label
+              className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer select-none"
+              title="Automatically test DNS MX records for all extracted email domains"
+            >
+              <input
+                type="checkbox"
+                checked={autoCheckMX}
+                onChange={(e) => {
+                  const val = e.target.checked;
+                  setAutoCheckMX(val);
+                  if (val && uncheckedMXCount > 0) {
+                    performMXCheck(contacts, false);
+                  }
+                }}
+                className="w-4 h-4 rounded text-blue-500 bg-gray-900 border-gray-600 focus:ring-0"
+              />
+              <span className="flex items-center gap-1">
+                <ShieldCheck className="w-3.5 h-3.5 text-blue-400" />
+                Auto MX Check
+              </span>
+            </label>
+
+            <label className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer select-none">
               <input
                 type="checkbox"
                 checked={deduplicate}
@@ -543,6 +748,23 @@ export const FileTextContactExtractor: React.FC<FileTextContactExtractorProps> =
               />
               <span>Deduplicate values</span>
             </label>
+
+            <button
+              type="button"
+              onClick={() => performMXCheck(contacts, true)}
+              disabled={isCheckingMX || emailCount === 0}
+              className="px-3 py-1.5 text-xs font-bold rounded-lg bg-blue-600 hover:bg-blue-500 text-white shadow transition flex items-center gap-1.5 disabled:opacity-50"
+              title="Quickly test MX records via DNS-over-HTTPS"
+            >
+              {isCheckingMX ? (
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <ShieldCheck className="w-3.5 h-3.5 text-blue-200" />
+              )}
+              {isCheckingMX
+                ? `Checking MX (${mxProgress?.current || 0}/${mxProgress?.total || 0})...`
+                : 'Quick MX Check'}
+            </button>
 
             <button
               type="button"
@@ -738,7 +960,7 @@ export const FileTextContactExtractor: React.FC<FileTextContactExtractorProps> =
         <div className="lg:col-span-7 bg-gray-800/60 border border-gray-700 rounded-xl p-5 shadow-lg space-y-4 flex flex-col justify-between">
           <div>
             {/* KPI STATS BAR */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-4">
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 mb-4">
               <div className="p-3 bg-gray-900 border border-gray-700 rounded-xl text-center">
                 <span className="text-[11px] text-gray-400 font-medium block">Total Extracted</span>
                 <span className="text-xl font-extrabold text-white font-mono">{contacts.length}</span>
@@ -760,6 +982,35 @@ export const FileTextContactExtractor: React.FC<FileTextContactExtractorProps> =
                   <Globe className="w-3 h-3" /> Webit / URLs
                 </span>
                 <span className="text-xl font-extrabold text-purple-300 font-mono">{webTotalCount}</span>
+              </div>
+              <div className="p-3 bg-gray-900 border border-indigo-600/30 rounded-xl text-center flex flex-col justify-center">
+                <span className="text-[11px] text-indigo-400 font-medium block flex items-center justify-center gap-1">
+                  <ShieldCheck className="w-3 h-3" /> MX Health
+                </span>
+                {isCheckingMX ? (
+                  <span className="text-xs font-bold text-blue-300 animate-pulse flex items-center justify-center gap-1 mt-1">
+                    <RefreshCw className="w-3 h-3 animate-spin" />
+                    {mxProgress ? `${mxProgress.current}/${mxProgress.total}` : 'Checking...'}
+                  </span>
+                ) : validMXCount > 0 || deadMXCount > 0 ? (
+                  <div className="mt-0.5">
+                    <span className="text-base font-extrabold text-emerald-300 font-mono">{validMXCount}</span>
+                    <span className="text-xs text-gray-400 font-mono"> / {validMXCount + deadMXCount}</span>
+                    {deadMXCount > 0 && (
+                      <span className="text-[10px] text-red-400 block font-semibold">({deadMXCount} dead)</span>
+                    )}
+                  </div>
+                ) : emailCount > 0 ? (
+                  <button
+                    type="button"
+                    onClick={() => performMXCheck(contacts, true)}
+                    className="mt-1 px-2 py-0.5 text-[10px] font-bold rounded bg-blue-900/50 hover:bg-blue-800 text-blue-300 border border-blue-600/40 transition"
+                  >
+                    Run Quick Check
+                  </button>
+                ) : (
+                  <span className="text-xs text-gray-500 mt-1 font-mono">None</span>
+                )}
               </div>
             </div>
 
@@ -788,6 +1039,32 @@ export const FileTextContactExtractor: React.FC<FileTextContactExtractorProps> =
                 >
                   <Mail className="w-3 h-3" /> Emails ({emailCount})
                 </button>
+                {validMXCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setActiveFilterType('mx-valid')}
+                    className={`px-2.5 py-1 text-xs font-bold rounded-md transition flex items-center gap-1 ${
+                      activeFilterType === 'mx-valid'
+                        ? 'bg-emerald-600 text-white'
+                        : 'bg-emerald-950/40 text-emerald-300 border border-emerald-700/40 hover:text-white'
+                    }`}
+                  >
+                    <CheckCircle2 className="w-3 h-3 text-emerald-400" /> Active MX ({validMXCount})
+                  </button>
+                )}
+                {deadMXCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setActiveFilterType('mx-invalid')}
+                    className={`px-2.5 py-1 text-xs font-bold rounded-md transition flex items-center gap-1 ${
+                      activeFilterType === 'mx-invalid'
+                        ? 'bg-red-600 text-white'
+                        : 'bg-red-950/40 text-red-300 border border-red-700/40 hover:text-white'
+                    }`}
+                  >
+                    <XCircle className="w-3 h-3 text-red-400" /> Dead MX ({deadMXCount})
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => setActiveFilterType('phone')}
@@ -821,6 +1098,17 @@ export const FileTextContactExtractor: React.FC<FileTextContactExtractorProps> =
                 >
                   Websites ({websiteCount})
                 </button>
+                {deadMXCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={handlePurgeDeadMX}
+                    className="px-2 py-1 text-xs font-semibold rounded-md bg-red-900/60 hover:bg-red-800 text-red-200 border border-red-600/50 transition flex items-center gap-1"
+                    title="Remove all dead or missing MX email addresses"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                    Purge Dead MX ({deadMXCount})
+                  </button>
+                )}
               </div>
 
               {/* SEARCH INPUT */}
@@ -846,6 +1134,7 @@ export const FileTextContactExtractor: React.FC<FileTextContactExtractorProps> =
                         <th className="py-2.5 px-3">Type</th>
                         <th className="py-2.5 px-3">Contact Information</th>
                         <th className="py-2.5 px-3">Classification</th>
+                        <th className="py-2.5 px-3">MX Record</th>
                         <th className="py-2.5 px-3">Source</th>
                         <th className="py-2.5 px-3 text-right">Actions</th>
                       </tr>
@@ -917,15 +1206,72 @@ export const FileTextContactExtractor: React.FC<FileTextContactExtractorProps> =
                             )}
                           </td>
 
+                          <td className="py-2.5 px-3 whitespace-nowrap">
+                            {item.type === 'email' ? (
+                              item.mxStatus === 'valid' ? (
+                                <div className="flex flex-col items-start gap-0.5">
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-950/80 text-emerald-300 border border-emerald-500/50">
+                                    <CheckCircle2 className="w-2.5 h-2.5 text-emerald-400 shrink-0" /> Active MX
+                                  </span>
+                                  {item.mxProvider && (
+                                    <span
+                                      className="text-[9px] text-gray-400 font-mono pl-0.5 max-w-[130px] truncate block"
+                                      title={item.mxDiagnostic || item.mxProvider}
+                                    >
+                                      {item.mxProvider}
+                                    </span>
+                                  )}
+                                </div>
+                              ) : item.mxStatus === 'invalid' ? (
+                                <div className="flex flex-col items-start gap-0.5">
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-red-950/80 text-red-300 border border-red-500/50">
+                                    <XCircle className="w-2.5 h-2.5 text-red-400 shrink-0" /> Dead / No MX
+                                  </span>
+                                  <span
+                                    className="text-[9px] text-red-400/80 font-mono pl-0.5 max-w-[130px] truncate block"
+                                    title={item.mxDiagnostic || 'No Mail Exchanger'}
+                                  >
+                                    {item.mxProvider || 'No mail server'}
+                                  </span>
+                                </div>
+                              ) : item.mxStatus === 'checking' ? (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-blue-950/70 text-blue-300 border border-blue-500/50 animate-pulse">
+                                  <RefreshCw className="w-2.5 h-2.5 text-blue-400 animate-spin" /> Checking DNS...
+                                </span>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => checkSingleEmailMX(item)}
+                                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-medium bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white border border-gray-700 transition"
+                                  title="Perform quick DNS MX check on this domain"
+                                >
+                                  <ShieldCheck className="w-2.5 h-2.5 text-gray-400" /> Check MX
+                                </button>
+                              )
+                            ) : (
+                              <span className="text-gray-600 font-mono text-[11px]">-</span>
+                            )}
+                          </td>
+
                           <td className="py-2.5 px-3 text-gray-400 truncate max-w-[120px]" title={item.source}>
                             <span className="text-[11px] font-mono">{item.source}</span>
                           </td>
 
-                          <td className="py-2.5 px-3 text-right whitespace-nowrap">
+                          <td className="py-2.5 px-3 text-right whitespace-nowrap space-x-1">
+                            {item.type === 'email' && (
+                              <button
+                                type="button"
+                                onClick={() => checkSingleEmailMX(item)}
+                                className="p-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-blue-300 transition border border-gray-700 inline-flex items-center"
+                                title="Re-check MX record for domain"
+                              >
+                                <RefreshCw className="w-3.5 h-3.5" />
+                              </button>
+                            )}
                             <button
                               type="button"
                               onClick={() => handleCopySingle(item)}
-                              className="p-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-300 hover:text-white transition border border-gray-700"
+                              className="p-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-300 hover:text-white transition border border-gray-700 inline-flex items-center"
                               title="Copy to clipboard"
                             >
                               {copiedId === item.id ? (
@@ -987,6 +1333,29 @@ export const FileTextContactExtractor: React.FC<FileTextContactExtractorProps> =
                     className="px-2.5 py-1.5 text-xs font-semibold rounded-lg bg-blue-900/40 hover:bg-blue-900/70 text-blue-200 border border-blue-700/50 transition flex items-center gap-1"
                   >
                     <Mail className="w-3 h-3" /> Copy Emails ({emailCount})
+                  </button>
+                )}
+
+                {validMXCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleCopyValidMX}
+                    className="px-2.5 py-1.5 text-xs font-semibold rounded-lg bg-emerald-950/60 hover:bg-emerald-900/80 text-emerald-300 border border-emerald-700/50 transition flex items-center gap-1"
+                    title="Copy only verified emails with active MX"
+                  >
+                    <CheckCircle2 className="w-3 h-3 text-emerald-400" /> Copy Valid MX ({validMXCount})
+                  </button>
+                )}
+
+                {emailCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => performMXCheck(contacts, true)}
+                    disabled={isCheckingMX}
+                    className="px-2.5 py-1.5 text-xs font-semibold rounded-lg bg-blue-900/40 hover:bg-blue-900/70 text-blue-200 border border-blue-700/50 transition flex items-center gap-1 disabled:opacity-50"
+                  >
+                    <ShieldCheck className={`w-3 h-3 ${isCheckingMX ? 'animate-spin' : ''}`} />
+                    {isCheckingMX ? 'Checking MX...' : 'Quick MX Check'}
                   </button>
                 )}
 
