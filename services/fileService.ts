@@ -1,4 +1,7 @@
 import * as XLSX from 'xlsx';
+import { streamExtractEmailsFromFile, StreamParserOptions, StreamProgressStats } from './streamingFileParser';
+
+export * from './streamingFileParser';
 
 /**
  * Extracts emails from a string using a robust regex.
@@ -47,9 +50,19 @@ export const extractEmailsFromString = (
 
 /**
  * Reads a file and extracts all emails found within it.
+ * Uses streaming chunk parser for files > 2MB or when streaming options are provided.
  * Supports .txt, .csv, .xlsx, .xls
  */
-export const extractEmailsFromFile = async (file: File): Promise<string[]> => {
+export const extractEmailsFromFile = async (
+  file: File,
+  options?: StreamParserOptions
+): Promise<string[]> => {
+  // If file is bulky (> 2MB) or streaming options provided, use thread-safe stream parser
+  if (file.size > 2 * 1024 * 1024 || options?.onProgress || options?.signal) {
+    const result = await streamExtractEmailsFromFile(file, options);
+    return result.emails;
+  }
+
   const extension = file.name.split('.').pop()?.toLowerCase();
 
   return new Promise((resolve, reject) => {
@@ -77,7 +90,7 @@ export const extractEmailsFromFile = async (file: File): Promise<string[]> => {
           text = data as string;
         }
 
-        resolve(extractEmailsFromString(text));
+        resolve(extractEmailsFromString(text, { preserveRoleAccounts: options?.preserveRoleAccounts }));
       } catch (error) {
         console.error("Error parsing file:", error);
         reject(new Error("Failed to parse file. Please ensure it's a valid text, CSV, or Excel file."));

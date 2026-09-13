@@ -1,6 +1,6 @@
 {
   "name": "Email Extractor Pro",
-  "description": "High-performance email discovery, sorting, and validation system, utilizing authentic web scraping, search engine dorks, DNS checks, and SMTP verification.",
+  "description": "High-performance email, phone number, and webmail extraction system with bulk file and text scraping, autonomous lead discovery, DNS checks, and verification.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

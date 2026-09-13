@@ -1,12 +1,13 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback, useMemo } from 'react';
 import { extractEmailsFromFile } from '../services/fileService';
+import * as XLSX from 'xlsx';
 import DocumentArrowUpIcon from './icons/DocumentArrowUpIcon';
 import FolderOpenIcon from './icons/FolderOpenIcon';
 import ClipboardIcon from './icons/ClipboardIcon';
 import CheckIcon from './icons/CheckIcon';
 import XCircleIcon from './icons/XCircleIcon';
-import TrashIcon from './icons/XCircleIcon'; // We can reuse XCircleIcon or make a clean close/delete action
 import ArrowPathIcon from './icons/ArrowPathIcon';
+import StopIcon from './icons/StopIcon';
 import { useActiveWakeLock } from '../hooks/useWakeLock';
 
 interface FolderExtractorProps {
@@ -43,8 +44,13 @@ export const FolderExtractor: React.FC<FolderExtractorProps> = ({ showToast, onS
   const [searchQuery, setSearchQuery] = useState('');
   const [fileFilter, setFileFilter] = useState('');
 
+  // High performance pagination for huge lists
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
+
   const multiFileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   // Helper to format bytes
   const formatBytes = (bytes: number): string => {
@@ -99,6 +105,13 @@ export const FolderExtractor: React.FC<FolderExtractorProps> = ({ showToast, onS
     return files;
   };
 
+  const handleStopProcessing = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      showToast("Stopping file parser...");
+    }
+  };
+
   // Core Processing Engine
   const processFiles = async (filesToProcess: File[]) => {
     if (filesToProcess.length === 0) {
@@ -107,6 +120,7 @@ export const FolderExtractor: React.FC<FolderExtractorProps> = ({ showToast, onS
     }
 
     setIsProcessing(true);
+    abortControllerRef.current = new AbortController();
     setStatusText(`Preparing to extract from ${filesToProcess.length} files...`);
     setProgress({ current: 0, total: filesToProcess.length });
 
@@ -119,14 +133,19 @@ export const FolderExtractor: React.FC<FolderExtractorProps> = ({ showToast, onS
       tempEmailsMap.set(item.email, new Set(item.sourceFiles));
     });
 
-    const fileMap = new Map<string, ProcessedFile>();
-    processedFiles.forEach(f => fileMap.set(f.name, f));
-
-    // Process files sequentially to keep UI responsive and track progress accurately
+    // Process files sequentially with browser event loop yielding
     for (let i = 0; i < filesToProcess.length; i++) {
+      if (abortControllerRef.current?.signal.aborted) {
+        showToast("Processing stopped by user.");
+        break;
+      }
+
       const file = filesToProcess[i];
       setProgress({ current: i + 1, total: filesToProcess.length });
-      setStatusText(`Processing file: ${file.name} (${formatBytes(file.size)})...`);
+      setStatusText(`Streaming: ${file.name} (${formatBytes(file.size)})...`);
+
+      // Yield control to ensure UI stays silky smooth
+      await new Promise(r => setTimeout(r, 0));
 
       try {
         const emailsExtracted = await extractEmailsFromFile(file);
@@ -184,186 +203,237 @@ export const FolderExtractor: React.FC<FolderExtractorProps> = ({ showToast, onS
     setExtractedEmails(mergedEmails);
     setIsProcessing(false);
     setProgress(null);
-    setStatusText('Idle');
-    showToast(`Extraction complete! Found ${mergedEmails.length} unique emails across ${combinedFileLogsMap.size} files.`);
+    setStatusText('Completed');
+    abortControllerRef.current = null;
+
+    showToast(`Processed ${filesToProcess.length} file(s). Found ${mergedEmails.length} unique business emails.`);
   };
 
-  // Drag & Drop Handlers
+  // Drag & Drop handlers
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault();
+    e.stopPropagation();
     setIsDragging(true);
   };
 
-  const handleDragLeave = () => {
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
     setIsDragging(false);
   };
 
-   const handleDrop = async (e: React.DragEvent) => {
+  const handleDrop = async (e: React.DragEvent) => {
     e.preventDefault();
+    e.stopPropagation();
     setIsDragging(false);
 
-    if (isProcessing) return;
-
-    const items = e.dataTransfer.items;
-    if (!items) {
-      // Fallback if webkitGetAsEntry not supported
-      const files = (Array.from(e.dataTransfer.files) as File[]).filter(isSupportedFile);
-      await processFiles(files);
+    if (isProcessing) {
+      showToast("Please wait for current files to finish processing.");
       return;
     }
 
-    setStatusText("Analyzing dragged items...");
-    const filesToProcess: File[] = [];
-    const traversePromises: Promise<File[]>[] = [];
+    const items = e.dataTransfer.items;
+    const filesToExtract: File[] = [];
 
-    for (let i = 0; i < items.length; i++) {
-      const item = items[i];
-      if (item.kind === 'file') {
-        const entry = item.webkitGetAsEntry ? item.webkitGetAsEntry() : null;
-        if (entry) {
-          traversePromises.push(traverseFileSystemEntry(entry));
+    if (items && items.length > 0) {
+      const entryPromises: Promise<File[]>[] = [];
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        if (typeof item.webkitGetAsEntry === 'function') {
+          const entry = item.webkitGetAsEntry();
+          if (entry) {
+            entryPromises.push(traverseFileSystemEntry(entry));
+          }
         } else {
           const file = item.getAsFile();
           if (file && isSupportedFile(file)) {
-            filesToProcess.push(file);
+            filesToExtract.push(file);
           }
+        }
+      }
+
+      if (entryPromises.length > 0) {
+        setStatusText("Scanning folder directories...");
+        const nestedArrays = await Promise.all(entryPromises);
+        nestedArrays.forEach(arr => filesToExtract.push(...arr));
+      }
+    } else if (e.dataTransfer.files) {
+      for (let i = 0; i < e.dataTransfer.files.length; i++) {
+        const file = e.dataTransfer.files[i];
+        if (isSupportedFile(file)) {
+          filesToExtract.push(file);
         }
       }
     }
 
-    if (traversePromises.length > 0) {
-      const results = await Promise.all(traversePromises);
-      results.forEach(fileArray => filesToProcess.push(...fileArray));
-    }
-
-    await processFiles(filesToProcess);
+    await processFiles(filesToExtract);
   };
 
-  // File Input Change Handlers
   const handleMultiFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files ? (Array.from(e.target.files) as File[]) : [];
-    const supported = files.filter(isSupportedFile) as File[];
-    await processFiles(supported);
-    if (multiFileInputRef.current) multiFileInputRef.current.value = '';
+    if (e.target.files && e.target.files.length > 0) {
+      const filesArray = (Array.from(e.target.files) as File[]).filter(isSupportedFile);
+      await processFiles(filesArray);
+      e.target.value = '';
+    }
   };
 
   const handleFolderChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files ? (Array.from(e.target.files) as File[]) : [];
-    const supported = files.filter(isSupportedFile) as File[];
-    await processFiles(supported);
-    if (folderInputRef.current) folderInputRef.current.value = '';
-  };
-
-  // Individual item / list cleanup operations
-  const handleRemoveEmail = (emailToRemove: string) => {
-    setExtractedEmails(prev => prev.filter(e => e.email !== emailToRemove));
-    showToast("Email removed from list.");
-  };
-
-  const handleClearAll = () => {
-    if (window.confirm("Are you sure you want to clear all extracted emails and file history?")) {
-      setExtractedEmails([]);
-      setProcessedFiles([]);
-      showToast("All data cleared.");
+    if (e.target.files && e.target.files.length > 0) {
+      const filesArray = (Array.from(e.target.files) as File[]).filter(isSupportedFile);
+      await processFiles(filesArray);
+      e.target.value = '';
     }
   };
 
-  // Exporters
-  const downloadTextFile = () => {
-    if (extractedEmails.length === 0) return;
-    const content = extractedEmails.map(e => e.email).join('\n');
-    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `extracted_emails_merged_${new Date().toISOString().split('T')[0]}.txt`;
-    link.click();
-    URL.revokeObjectURL(url);
-    showToast("Downloaded merged TXT file.");
+  const handleClearAll = () => {
+    if (window.confirm("Are you sure you want to clear all processed files and extracted emails?")) {
+      setProcessedFiles([]);
+      setExtractedEmails([]);
+      showToast("Cleared all file extraction history.");
+    }
   };
 
-  const downloadCsvFile = () => {
-    if (extractedEmails.length === 0) return;
-    
-    // Header
-    let csvContent = "Email,Domain,Source Files\n";
-    
-    // Rows
-    extractedEmails.forEach(item => {
-      const escapedEmail = `"${item.email.replace(/"/g, '""')}"`;
-      const escapedDomain = `"${item.domain.replace(/"/g, '""')}"`;
-      const escapedSources = `"${item.sourceFiles.join('; ').replace(/"/g, '""')}"`;
-      csvContent += `${escapedEmail},${escapedDomain},${escapedSources}\n`;
+  const handleRemoveEmail = (emailToRemove: string) => {
+    setExtractedEmails(prev => prev.filter(item => item.email !== emailToRemove));
+    showToast(`Removed ${emailToRemove}`);
+  };
+
+  // Filtered emails
+  const filteredEmails = useMemo(() => {
+    return extractedEmails.filter(item => {
+      const matchesSearch = searchQuery === '' || 
+        item.email.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        item.domain.toLowerCase().includes(searchQuery.toLowerCase());
+      
+      const matchesFile = fileFilter === '' || item.sourceFiles.includes(fileFilter);
+
+      return matchesSearch && matchesFile;
     });
+  }, [extractedEmails, searchQuery, fileFilter]);
 
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `extracted_emails_merged_${new Date().toISOString().split('T')[0]}.csv`;
-    link.click();
-    URL.revokeObjectURL(url);
-    showToast("Downloaded merged CSV file.");
-  };
+  // Reset pagination on filter changes
+  React.useEffect(() => {
+    setCurrentPage(1);
+  }, [searchQuery, fileFilter, extractedEmails.length]);
 
+  const totalPages = Math.max(1, Math.ceil(filteredEmails.length / pageSize));
+  const paginatedEmails = useMemo(() => {
+    const start = (currentPage - 1) * pageSize;
+    return filteredEmails.slice(start, start + pageSize);
+  }, [filteredEmails, currentPage, pageSize]);
+
+  // Unique list of source files for the dropdown filter
+  const uniqueSourceFiles = useMemo(() => {
+    const set = new Set<string>();
+    extractedEmails.forEach(item => item.sourceFiles.forEach(f => set.add(f)));
+    return Array.from(set).sort();
+  }, [extractedEmails]);
+
+  // Copy all
   const copyToClipboard = () => {
-    if (extractedEmails.length === 0) return;
-    const emailsList = extractedEmails.map(e => e.email).join('\n');
-    navigator.clipboard.writeText(emailsList)
-      .then(() => showToast("Copied all unique emails to clipboard!"))
-      .catch(() => showToast("Failed to copy to clipboard."));
+    if (filteredEmails.length === 0) return;
+    const text = filteredEmails.map(item => item.email).join('\n');
+    navigator.clipboard.writeText(text);
+    showToast(`Copied ${filteredEmails.length} emails to clipboard!`);
   };
 
-  // Filtered lists
-  const filteredEmails = extractedEmails.filter(item => {
-    const matchesSearch = item.email.includes(searchQuery.toLowerCase()) || item.domain.includes(searchQuery.toLowerCase());
-    const matchesFile = fileFilter === '' || item.sourceFiles.includes(fileFilter);
-    return matchesSearch && matchesFile;
-  });
+  // Download TXT
+  const downloadTextFile = () => {
+    if (filteredEmails.length === 0) return;
+    const text = filteredEmails.map(item => item.email).join('\n');
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `extracted_emails_${filteredEmails.length}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast(`Downloaded ${filteredEmails.length} emails as TXT`);
+  };
 
-  const uniqueSourceFiles = Array.from(new Set(extractedEmails.flatMap(e => e.sourceFiles))).sort();
+  // Download CSV
+  const downloadCsvFile = () => {
+    if (filteredEmails.length === 0) return;
+    const header = "Email,Domain,SourceFiles\n";
+    const rows = filteredEmails.map(item => {
+      const escapedSources = `"${item.sourceFiles.join('; ').replace(/"/g, '""')}"`;
+      return `${item.email},${item.domain},${escapedSources}`;
+    }).join('\n');
+
+    const blob = new Blob([header + rows], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `extracted_emails_${filteredEmails.length}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast(`Downloaded ${filteredEmails.length} emails as CSV`);
+  };
+
+  // Download Excel (.xlsx)
+  const downloadExcelFile = () => {
+    if (filteredEmails.length === 0) return;
+    const rows = filteredEmails.map(item => ({
+      "Email Address": item.email,
+      "Domain": item.domain,
+      "Source Documents": item.sourceFiles.join('; ')
+    }));
+    const worksheet = XLSX.utils.json_to_sheet(rows);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Extracted Emails");
+    XLSX.writeFile(workbook, `extracted_emails_${filteredEmails.length}.xlsx`);
+    showToast(`Downloaded ${filteredEmails.length} emails as Excel (.xlsx)`);
+  };
 
   return (
-    <div className="space-y-8" id="folder-file-extractor">
-      
-      {/* 2x2 Header layout or standard card */}
-      <div className="bg-gray-800/50 border border-gray-700 rounded-xl p-6 shadow-xl backdrop-blur-sm">
-        <h2 className="text-2xl font-bold text-white mb-2 flex items-center">
-          <FolderOpenIcon className="w-6 h-6 mr-2 text-blue-400" />
-          Bulk File & Folder Email Extractor
-        </h2>
-        <p className="text-gray-400 text-sm mb-6">
-          Deduplicate and extract email lists directly from files on your desktop. Upload multiple documents or select an entire folder recursively. Works instantly without sending your file contents to third-party servers!
-        </p>
+    <div className="space-y-6">
+      {/* Upload Zone Card */}
+      <div className="bg-gray-800/40 border border-gray-700 rounded-xl p-6 shadow-xl backdrop-blur-md">
+        <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 mb-6">
+          <div>
+            <h2 className="text-xl font-bold text-white flex items-center">
+              <FolderOpenIcon className="w-6 h-6 mr-2 text-teal-400" />
+              Bulky File & Folder Archive Extractor
+            </h2>
+            <p className="text-gray-400 text-xs mt-1">
+              Recursively extract business contacts from entire folders or massive documents (CSV, XLSX, TXT) with non-blocking streaming.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-xs bg-teal-950/80 text-teal-300 border border-teal-700/60 px-2.5 py-1 rounded-full font-medium">
+              🛡️ Chunked Stream Mode: Zero Freeze
+            </span>
+          </div>
+        </div>
 
-        {/* Upload Zone */}
+        {/* Drag and Drop Dropzone */}
         <div
           onDragOver={handleDragOver}
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
-          className={`border-2 border-dashed rounded-xl p-8 flex flex-col items-center justify-center text-center transition-all ${
-            isDragging
-              ? 'border-blue-400 bg-blue-500/10'
-              : 'border-gray-600 bg-gray-900/40 hover:border-gray-500 hover:bg-gray-900/60'
-          } ${isProcessing ? 'opacity-50 pointer-events-none' : 'cursor-pointer'}`}
+          className={`border-2 border-dashed rounded-xl p-8 text-center transition-all flex flex-col items-center justify-center cursor-pointer ${
+            isDragging 
+              ? 'border-blue-400 bg-blue-900/20' 
+              : 'border-gray-600 hover:border-gray-500 bg-gray-900/40'
+          }`}
         >
-          <DocumentArrowUpIcon className={`w-16 h-16 mb-4 transition-transform ${isDragging ? 'scale-110 text-blue-400' : 'text-gray-400'}`} />
+          <DocumentArrowUpIcon className={`w-14 h-14 mb-3 transition-transform ${isDragging ? 'scale-110 text-blue-400' : 'text-gray-400'}`} />
           
-          <div className="text-white font-bold text-lg mb-2">
-            Drag & Drop Files or Folders Here
+          <div className="text-white font-bold text-base mb-1">
+            Drag & Drop Bulky Files or Whole Folders Here
           </div>
-          <p className="text-gray-400 text-sm max-w-md mb-6">
-            Supports <strong className="text-blue-400">TXT, CSV, XLSX, XLS</strong> and other documents. Drop folders directly from your desktop to read recursively.
+          <p className="text-gray-400 text-xs max-w-md mb-5">
+            Supports <strong className="text-blue-400">TXT, CSV, XLSX, XLS</strong> and logs. Drop folders directly from your desktop to read recursively.
           </p>
 
-          <div className="flex flex-wrap gap-4 justify-center">
+          <div className="flex flex-wrap gap-3 justify-center">
             {/* Multi-file Input Trigger */}
             <button
               onClick={() => multiFileInputRef.current?.click()}
               disabled={isProcessing}
-              className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-bold text-sm rounded-lg transition-all flex items-center shadow-lg disabled:opacity-50"
+              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-lg transition-all flex items-center shadow-lg disabled:opacity-50"
             >
-              <DocumentArrowUpIcon className="w-4 h-4 mr-2" />
+              <DocumentArrowUpIcon className="w-4 h-4 mr-1.5" />
               Select Multiple Files
             </button>
             <input
@@ -379,9 +449,9 @@ export const FolderExtractor: React.FC<FolderExtractorProps> = ({ showToast, onS
             <button
               onClick={() => folderInputRef.current?.click()}
               disabled={isProcessing}
-              className="px-5 py-2.5 bg-teal-600 hover:bg-teal-700 text-white font-bold text-sm rounded-lg transition-all flex items-center shadow-lg disabled:opacity-50"
+              className="px-4 py-2 bg-teal-600 hover:bg-teal-700 text-white font-bold text-xs rounded-lg transition-all flex items-center shadow-lg disabled:opacity-50"
             >
-              <FolderOpenIcon className="w-4 h-4 mr-2" />
+              <FolderOpenIcon className="w-4 h-4 mr-1.5" />
               Select Folder
             </button>
             <input
@@ -398,21 +468,30 @@ export const FolderExtractor: React.FC<FolderExtractorProps> = ({ showToast, onS
           </div>
         </div>
 
-        {/* Real-time Loader Indicator */}
+        {/* Real-time Loader Indicator with Stop Button */}
         {isProcessing && progress && (
-          <div className="mt-6 p-4 bg-gray-900/80 border border-gray-700 rounded-lg space-y-3">
-            <div className="flex items-center justify-between text-sm">
+          <div className="mt-4 p-4 bg-gray-900/80 border border-gray-700 rounded-lg space-y-3">
+            <div className="flex items-center justify-between text-xs">
               <span className="text-blue-400 font-medium flex items-center">
                 <ArrowPathIcon className="w-4 h-4 mr-2 animate-spin text-blue-400" />
                 {statusText}
               </span>
-              <span className="text-gray-400 font-bold">
-                {progress.current} / {progress.total} Files
-              </span>
+              <div className="flex items-center gap-3">
+                <span className="text-gray-400 font-bold">
+                  {progress.current} / {progress.total} Files
+                </span>
+                <button
+                  onClick={handleStopProcessing}
+                  className="px-2.5 py-1 bg-red-600/30 hover:bg-red-600 text-red-300 hover:text-white rounded text-xs font-bold transition-colors flex items-center gap-1 border border-red-500/40"
+                >
+                  <StopIcon className="w-3.5 h-3.5" />
+                  Halt
+                </button>
+              </div>
             </div>
-            <div className="w-full bg-gray-800 h-2.5 rounded-full overflow-hidden">
+            <div className="w-full bg-gray-800 h-2 rounded-full overflow-hidden">
               <div
-                className="bg-blue-500 h-full transition-all duration-150"
+                className="bg-teal-500 h-full transition-all duration-150"
                 style={{ width: `${(progress.current / progress.total) * 100}%` }}
               ></div>
             </div>
@@ -422,11 +501,11 @@ export const FolderExtractor: React.FC<FolderExtractorProps> = ({ showToast, onS
 
       {/* Stats and Results Grid */}
       {processedFiles.length > 0 && (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
           
           {/* File Upload History log (Left Side) */}
           <div className="lg:col-span-4 bg-gray-800/40 border border-gray-700 rounded-xl p-5 shadow-xl">
-            <h3 className="text-lg font-bold text-white mb-4 flex items-center justify-between">
+            <h3 className="text-base font-bold text-white mb-3 flex items-center justify-between">
               <span>Source Files ({processedFiles.length})</span>
               <button
                 onClick={handleClearAll}
@@ -436,7 +515,7 @@ export const FolderExtractor: React.FC<FolderExtractorProps> = ({ showToast, onS
               </button>
             </h3>
 
-            <div className="space-y-3 max-h-[480px] overflow-y-auto pr-2 custom-scrollbar">
+            <div className="space-y-2.5 max-h-[460px] overflow-y-auto pr-2 custom-scrollbar">
               {processedFiles.map(file => (
                 <div key={file.id} className="p-3 bg-gray-900/50 border border-gray-800 rounded-lg flex items-center justify-between gap-3 text-xs">
                   <div className="min-w-0 flex-1">
@@ -450,7 +529,7 @@ export const FolderExtractor: React.FC<FolderExtractorProps> = ({ showToast, onS
                   <div className="text-right shrink-0">
                     {file.status === 'success' ? (
                       <div>
-                        <span className="text-teal-400 font-bold block">{file.emailsCount} emails</span>
+                        <span className="text-teal-400 font-bold block">{file.emailsCount.toLocaleString()} emails</span>
                         <span className="text-gray-500 text-[10px]">Processed</span>
                       </div>
                     ) : (
@@ -468,14 +547,14 @@ export const FolderExtractor: React.FC<FolderExtractorProps> = ({ showToast, onS
           </div>
 
           {/* Extracted Combined List (Right Side) */}
-          <div className="lg:col-span-8 bg-gray-800/40 border border-gray-700 rounded-xl p-5 shadow-xl flex flex-col min-h-[500px]">
+          <div className="lg:col-span-8 bg-gray-800/40 border border-gray-700 rounded-xl p-5 shadow-xl flex flex-col min-h-[480px]">
             
             {/* Filter and Export Header */}
-            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-gray-700 mb-4">
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 pb-3 border-b border-gray-700 mb-3">
               <div>
-                <h3 className="text-xl font-bold text-white">Extracted Email Database</h3>
-                <p className="text-xs text-teal-400 mt-1 font-bold">
-                  {extractedEmails.length} unique emails merged and deduplicated
+                <h3 className="text-lg font-bold text-white">Extracted Email Database</h3>
+                <p className="text-xs text-teal-400 mt-0.5 font-semibold">
+                  {extractedEmails.length.toLocaleString()} unique emails deduplicated across all documents
                 </p>
               </div>
 
@@ -488,50 +567,57 @@ export const FolderExtractor: React.FC<FolderExtractorProps> = ({ showToast, onS
                     className="px-3 py-1.5 bg-orange-600/30 hover:bg-orange-600 text-orange-200 hover:text-white rounded-lg text-xs font-bold transition-all flex items-center border border-orange-500/50 disabled:opacity-40"
                     title="Send extracted emails to Sorter & Validator"
                   >
-                    Validate & Sort ({extractedEmails.length})
+                    Validate & Sort ({extractedEmails.length.toLocaleString()})
                   </button>
                 )}
                 <button
                   onClick={copyToClipboard}
                   disabled={extractedEmails.length === 0}
-                  className="px-3 py-1.5 bg-gray-700 hover:bg-gray-600 text-white rounded-lg text-xs font-bold transition-all flex items-center disabled:opacity-40"
+                  className="px-2.5 py-1.5 bg-gray-700 hover:bg-gray-600 text-white rounded-lg text-xs font-bold transition-all flex items-center disabled:opacity-40"
                 >
                   <ClipboardIcon className="w-3.5 h-3.5 mr-1" />
-                  Copy Emails
+                  Copy
                 </button>
                 <button
                   onClick={downloadTextFile}
                   disabled={extractedEmails.length === 0}
-                  className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition-all flex items-center disabled:opacity-40"
+                  className="px-2.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition-all flex items-center disabled:opacity-40"
                 >
-                  Download TXT
+                  TXT
                 </button>
                 <button
                   onClick={downloadCsvFile}
                   disabled={extractedEmails.length === 0}
-                  className="px-3 py-1.5 bg-teal-600 hover:bg-teal-700 text-white rounded-lg text-xs font-bold transition-all flex items-center disabled:opacity-40"
+                  className="px-2.5 py-1.5 bg-teal-600 hover:bg-teal-700 text-white rounded-lg text-xs font-bold transition-all flex items-center disabled:opacity-40"
                 >
-                  Download CSV
+                  CSV
+                </button>
+                <button
+                  onClick={downloadExcelFile}
+                  disabled={extractedEmails.length === 0}
+                  className="px-2.5 py-1.5 bg-green-600 hover:bg-green-700 text-white rounded-lg text-xs font-bold transition-all flex items-center disabled:opacity-40"
+                >
+                  XLSX
                 </button>
               </div>
             </div>
 
             {/* Filter controls */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
               <div>
                 <input
                   type="text"
                   placeholder="Search email or domain..."
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  className="w-full px-3 py-1.5 bg-gray-900 border border-gray-700 rounded-lg text-sm focus:ring-1 focus:ring-blue-500 focus:outline-none text-white"
+                  className="w-full px-3 py-1.5 bg-gray-900 border border-gray-700 rounded-lg text-xs focus:ring-1 focus:ring-blue-500 focus:outline-none text-white"
                 />
               </div>
               <div>
                 <select
                   value={fileFilter}
                   onChange={(e) => setFileFilter(e.target.value)}
-                  className="w-full px-3 py-1.5 bg-gray-900 border border-gray-700 rounded-lg text-sm focus:ring-1 focus:ring-blue-500 focus:outline-none text-gray-300"
+                  className="w-full px-3 py-1.5 bg-gray-900 border border-gray-700 rounded-lg text-xs focus:ring-1 focus:ring-blue-500 focus:outline-none text-gray-300"
                 >
                   <option value="">All Source Files ({uniqueSourceFiles.length})</option>
                   {uniqueSourceFiles.map(fn => (
@@ -541,17 +627,17 @@ export const FolderExtractor: React.FC<FolderExtractorProps> = ({ showToast, onS
               </div>
             </div>
 
-            {/* Table Area */}
+            {/* Table Area with Paginated Rendering */}
             <div className="flex-1 overflow-x-auto">
               {filteredEmails.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-12 text-center h-full">
-                  <XCircleIcon className="w-12 h-12 text-gray-500 mb-2" />
-                  <p className="text-gray-400 text-sm">No emails found matching your filters.</p>
+                  <XCircleIcon className="w-10 h-10 text-gray-500 mb-2" />
+                  <p className="text-gray-400 text-xs">No emails found matching your filters.</p>
                 </div>
               ) : (
-                <div className="max-h-[360px] overflow-y-auto pr-1 custom-scrollbar">
+                <div className="max-h-[340px] overflow-y-auto pr-1 custom-scrollbar">
                   <table className="w-full border-collapse text-left text-xs">
-                    <thead>
+                    <thead className="sticky top-0 bg-gray-900/95 backdrop-blur-sm z-10">
                       <tr className="border-b border-gray-800 text-gray-400 font-semibold uppercase tracking-wider">
                         <th className="py-2.5 px-3">Email Address</th>
                         <th className="py-2.5 px-3">Domain</th>
@@ -560,30 +646,30 @@ export const FolderExtractor: React.FC<FolderExtractorProps> = ({ showToast, onS
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-800">
-                      {filteredEmails.map(item => (
+                      {paginatedEmails.map(item => (
                         <tr key={item.email} className="hover:bg-gray-800/30 transition-colors">
-                          <td className="py-2.5 px-3 font-semibold text-gray-100 select-all truncate max-w-[180px]" title={item.email}>
+                          <td className="py-2 px-3 font-semibold text-gray-100 select-all truncate max-w-[180px]" title={item.email}>
                             {item.email}
                           </td>
-                          <td className="py-2.5 px-3 text-gray-400 select-all">
+                          <td className="py-2 px-3 text-gray-400 select-all font-mono text-[11px]">
                             {item.domain}
                           </td>
-                          <td className="py-2.5 px-3">
+                          <td className="py-2 px-3">
                             <div className="flex flex-wrap gap-1 max-w-[200px]">
                               {item.sourceFiles.map(src => (
-                                <span key={src} className="inline-block px-1.5 py-0.5 bg-gray-700 text-gray-300 rounded text-[10px] truncate max-w-[120px]" title={src}>
+                                <span key={src} className="inline-block px-1.5 py-0.5 bg-gray-700/80 text-gray-300 rounded text-[10px] truncate max-w-[120px]" title={src}>
                                   {src}
                                 </span>
                               ))}
                             </div>
                           </td>
-                          <td className="py-2.5 px-3 text-right">
+                          <td className="py-2 px-3 text-right">
                             <button
                               onClick={() => handleRemoveEmail(item.email)}
                               className="text-gray-500 hover:text-red-400 p-1 rounded transition-colors"
                               title="Delete Email"
                             >
-                              <XCircleIcon className="w-4 h-4" />
+                              <XCircleIcon className="w-3.5 h-3.5" />
                             </button>
                           </td>
                         </tr>
@@ -594,15 +680,63 @@ export const FolderExtractor: React.FC<FolderExtractorProps> = ({ showToast, onS
               )}
             </div>
 
-            {/* Pagination / Total count summary footer */}
+            {/* Pagination Footer */}
             {filteredEmails.length > 0 && (
-              <div className="border-t border-gray-800 pt-3 mt-4 flex items-center justify-between text-xs text-gray-400">
-                <span>
-                  Showing {filteredEmails.length} of {extractedEmails.length} unique emails
-                </span>
-                <span>
-                  {searchQuery || fileFilter ? 'Filters active' : 'All results'}
-                </span>
+              <div className="border-t border-gray-800 pt-3 mt-3 flex flex-wrap items-center justify-between text-xs text-gray-400 gap-2 shrink-0">
+                <div className="flex items-center gap-2">
+                  <span>
+                    Showing <strong className="text-gray-200">{(currentPage - 1) * pageSize + 1}</strong> - <strong className="text-gray-200">{Math.min(currentPage * pageSize, filteredEmails.length)}</strong> of <strong className="text-teal-400 font-mono">{filteredEmails.length.toLocaleString()}</strong> unique emails
+                  </span>
+                  <select
+                    value={pageSize}
+                    onChange={(e) => {
+                      setPageSize(Number(e.target.value));
+                      setCurrentPage(1);
+                    }}
+                    className="bg-gray-900 border border-gray-700 text-gray-300 text-xs rounded px-1.5 py-0.5"
+                  >
+                    <option value={25}>25 / page</option>
+                    <option value={50}>50 / page</option>
+                    <option value={100}>100 / page</option>
+                    <option value={250}>250 / page</option>
+                  </select>
+                </div>
+
+                {totalPages > 1 && (
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      onClick={() => setCurrentPage(1)}
+                      disabled={currentPage === 1}
+                      className="px-2 py-0.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-30 rounded text-gray-300"
+                    >
+                      &laquo;
+                    </button>
+                    <button
+                      onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                      disabled={currentPage === 1}
+                      className="px-2 py-0.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-30 rounded text-gray-300"
+                    >
+                      &lsaquo;
+                    </button>
+                    <span className="font-mono text-gray-300 px-2">
+                      {currentPage} / {totalPages}
+                    </span>
+                    <button
+                      onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                      disabled={currentPage === totalPages}
+                      className="px-2 py-0.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-30 rounded text-gray-300"
+                    >
+                      &rsaquo;
+                    </button>
+                    <button
+                      onClick={() => setCurrentPage(totalPages)}
+                      disabled={currentPage === totalPages}
+                      className="px-2 py-0.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-30 rounded text-gray-300"
+                    >
+                      &raquo;
+                    </button>
+                  </div>
+                )}
               </div>
             )}
 

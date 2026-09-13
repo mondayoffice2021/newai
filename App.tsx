@@ -10,9 +10,11 @@ import MXSorter from './components/MXSorter';
 import SettingsModal from './components/SettingsModal';
 import { FolderExtractor } from './components/FolderExtractor';
 import { BulkUrlOpener } from './components/BulkUrlOpener';
+import { FileTextContactExtractor } from './components/FileTextContactExtractor';
 import { findAndExtractEmails, suggestKeywords, generateDeepSearchPlan, analyzeCompanyFromEmail, setGlobalApiKey } from './services/geminiService';
 import { buildDorkQuery, getCountryCcTLD, getSearchEngineUrl, SEARCH_ENGINES_LIST, EMAIL_PREFIX_OPTIONS, extractEmailsFromText } from './services/dorkHelper';
 import { filterDuplicateCompanies } from './services/duplicateChecker';
+import { runDeepLeadCrawler, generateIndustrySeedDomains, type LeadCrawlerProgress } from './services/leadCrawlerService';
 import SparklesIcon from './components/icons/SparklesIcon';
 import MagnifyingGlassIcon from './components/icons/MagnifyingGlassIcon';
 import LinkIcon from './components/icons/LinkIcon';
@@ -30,13 +32,19 @@ import ArrowsRightLeftIcon from './components/icons/ArrowsRightLeftIcon';
 import GlobeAltIcon from './components/icons/GlobeAltIcon';
 import CheckIcon from './components/icons/CheckIcon';
 import ClipboardIcon from './components/icons/ClipboardIcon';
+import PlayIcon from './components/icons/PlayIcon';
+import PauseIcon from './components/icons/PauseIcon';
+import StopIcon from './components/icons/StopIcon';
+import ArrowPathIcon from './components/icons/ArrowPathIcon';
 import { ScreenWakeLockIndicator } from './components/ScreenWakeLockIndicator';
 import { useActiveWakeLock } from './hooks/useWakeLock';
 
-
 const App: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'extractor' | 'sorter' | 'analyzer' | 'validator' | 'mx-sorter' | 'supply-chain' | 'bulk-extractor' | 'bulk-url-opener'>('extractor');
+  const [activeTab, setActiveTab] = useState<'extractor' | 'file-text-extractor' | 'sorter' | 'analyzer' | 'validator' | 'mx-sorter' | 'supply-chain' | 'bulk-extractor' | 'bulk-url-opener'>('extractor');
   
+  // Pipeline Mode within Extractor: 'dork' (Precision Query) | 'crawler' (Autonomous 1000+ Pipeline) | 'urls' (Bulk URL Spider) | 'file-text' (File & Text Extractor)
+  const [extractorMode, setExtractorMode] = useState<'dork' | 'crawler' | 'urls' | 'file-text'>('dork');
+
   // Extractor State
   const [country, setCountry] = useState<string>('Germany');
   const [keywords, setKeywords] = useState<string>('steel manufacturer');
@@ -47,8 +55,15 @@ const App: React.FC = () => {
   const [results, setResults] = useState<ExtractedEmail[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
 
+  // 1,000+ Lead Autonomous Crawler State
+  const [targetGoal, setTargetGoal] = useState<number>(1000);
+  const [isCrawlerRunning, setIsCrawlerRunning] = useState<boolean>(false);
+  const [crawlerProgress, setCrawlerProgress] = useState<LeadCrawlerProgress | null>(null);
+  const crawlerAbortRef = useRef<AbortController | null>(null);
+  const crawlerPauseRef = useRef<boolean>(false);
+
   // Keep screen awake automatically while searching/extracting
-  useActiveWakeLock(isLoading, 'Targeted Extractor: Crawling Web Dorks');
+  useActiveWakeLock(isLoading || isCrawlerRunning, 'Lead Engine: Extracting & Spidering Contacts');
   const [isSuggesting, setIsSuggesting] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [isDeepSearch, setIsDeepSearch] = useState<boolean>(false);
@@ -103,6 +118,9 @@ const App: React.FC = () => {
 
   const handleStopSearch = () => {
     stopSearchRef.current = true;
+    if (crawlerAbortRef.current) {
+      crawlerAbortRef.current.abort();
+    }
   };
 
   // Dynamic Dork Query Construction
@@ -240,120 +258,129 @@ const App: React.FC = () => {
     }
   }, [isLoading, currentDorkQuery, country, results, avoidDuplicateCompanies]);
 
-  const executeSearch = async (searchKeywords: string) => {
-     try {
-      if (isDeepSearch) {
-        setProgressMessage("Phase 1: Generating deep search plan...");
-        const searchPlan = await generateDeepSearchPlan(searchKeywords, country, industry);
-        
-        let totalNewEmails = 0;
-        let totalDupCompanies = 0;
+  // 1,000+ Autonomous Lead Crawler Launch
+  const handleStartCrawler = useCallback(async () => {
+    if (isLoading || isCrawlerRunning) return;
+    setError(null);
+    setIsCrawlerRunning(true);
+    setIsLoading(true);
+    crawlerAbortRef.current = new AbortController();
+    crawlerPauseRef.current = false;
+    setProgressMessage(`Initializing autonomous pipeline for ${targetGoal.toLocaleString()} leads...`);
 
-        for (let i = 0; i < searchPlan.length; i++) {
-          if (stopSearchRef.current) {
-            showToast("Deep search stopped by user.");
-            break;
-          }
-          const subKeyword = searchPlan[i];
-          setProgressMessage(`Phase 2 (${i + 1}/${searchPlan.length}): Searching for "${subKeyword}"...`);
-
-          const extracted = await findAndExtractEmails(subKeyword, country, industry, companySize, '', verifyDomains);
-
-          setResults(prevResults => {
-            const { unique, duplicateCompaniesCount } = filterDuplicateCompanies(
-              extracted,
-              prevResults,
-              avoidDuplicateCompanies
-            );
-            totalNewEmails += unique.length;
-            totalDupCompanies += duplicateCompaniesCount;
-            return [...prevResults, ...unique];
+    try {
+      const crawled = await runDeepLeadCrawler({
+        country: country || 'Germany',
+        keywords: keywords || 'steel manufacturer',
+        targetGoal,
+        emailPrefix,
+        avoidDuplicateCompanies,
+        signal: crawlerAbortRef.current.signal,
+        isPaused: () => crawlerPauseRef.current,
+        onProgress: (p) => {
+          setCrawlerProgress(p);
+          setProgressMessage(`[Crawler Round ${p.round}/${p.maxRounds}] ${p.status}`);
+        },
+        onNewLeads: (newBatch) => {
+          setResults(prev => {
+            const { unique } = filterDuplicateCompanies(newBatch, prev, avoidDuplicateCompanies);
+            return [...prev, ...unique];
           });
         }
-        showToast(`Deep search complete! Found ${totalNewEmails} new emails.${avoidDuplicateCompanies && totalDupCompanies > 0 ? ` (${totalDupCompanies} duplicate companies avoided)` : ''}`);
+      });
 
-      } else {
-        setProgressMessage("Searching for companies and extracting emails...");
-        const extractedEmails = await findAndExtractEmails(searchKeywords, country, industry, companySize, urls, verifyDomains);
-        
-        const { unique, duplicateEmailsCount, duplicateCompaniesCount } = filterDuplicateCompanies(
-          extractedEmails,
-          results,
-          avoidDuplicateCompanies
-        );
-        
-        setResults(prevResults => [...prevResults, ...unique]);
-        
-        let toastMessage = '';
-        if (unique.length === 0) {
-          toastMessage = (duplicateEmailsCount > 0 || duplicateCompaniesCount > 0)
-            ? `Found items, but ignored duplicates (${duplicateCompaniesCount} duplicate companies, ${duplicateEmailsCount} duplicate emails).` 
-            : "No new emails found for the given criteria.";
-        } else {
-          toastMessage = `Successfully extracted ${unique.length} new emails!`;
-          if (avoidDuplicateCompanies && duplicateCompaniesCount > 0) {
-            toastMessage += ` (${duplicateCompaniesCount} duplicate companies avoided.)`;
-          }
-          if (duplicateEmailsCount > 0) {
-            toastMessage += ` (${duplicateEmailsCount} duplicate emails skipped.)`;
-          }
-        }
-        showToast(toastMessage);
+      setResults(prev => {
+        const { unique } = filterDuplicateCompanies(crawled, prev, avoidDuplicateCompanies);
+        return [...prev, ...unique];
+      });
+
+      showToast(`Autonomous pipeline completed: extracted ${crawled.length} verified business leads!`);
+    } catch (err: any) {
+      if (err.name !== 'AbortError') {
+        setError(err.message || 'Crawler error occurred.');
       }
-    } catch (e: any) {
-      setError(e.message || 'An unknown error occurred.');
-      showToast("An error occurred during extraction.");
-    }
-  }
-
-  const handleExtract = useCallback(async () => {
-    if (isLoading) return;
-    setError(null);
-    setIsLoading(true);
-    stopSearchRef.current = false;
-    
-    try {
-        await executeSearch(keywords);
     } finally {
-        setIsLoading(false);
-        setProgressMessage(null);
+      setIsCrawlerRunning(false);
+      setIsLoading(false);
+      setProgressMessage(null);
+      crawlerAbortRef.current = null;
     }
-  }, [keywords, country, industry, companySize, urls, isLoading, results, isDeepSearch, verifyDomains, avoidDuplicateCompanies]);
+  }, [isLoading, isCrawlerRunning, country, keywords, targetGoal, emailPrefix, avoidDuplicateCompanies]);
 
-  const handleSimilarSearch = useCallback(async () => {
-    if (isLoading || !sourceEmail) return;
-    if (!country) {
-        showToast("Please select a target country for the competitor search.");
-        return;
+  const handleStopCrawler = () => {
+    if (crawlerAbortRef.current) {
+      crawlerAbortRef.current.abort();
+      showToast("Stopping crawler and retaining extracted leads...");
+    }
+  };
+
+  const handleTogglePauseCrawler = () => {
+    crawlerPauseRef.current = !crawlerPauseRef.current;
+    if (crawlerProgress) {
+      setCrawlerProgress({ ...crawlerProgress, isPaused: crawlerPauseRef.current });
+    }
+    showToast(crawlerPauseRef.current ? "Crawler paused." : "Crawler resumed.");
+  };
+
+  // URL Target Auto-Loader ("load urls enought to search emails withour anything")
+  const handleAutoLoadTargetUrls = useCallback(() => {
+    const seedUrls = generateIndustrySeedDomains(country || 'Germany', keywords || 'steel manufacturer');
+    setUrls(seedUrls.join('\n'));
+    showToast(`Auto-generated and loaded ${seedUrls.length} industry company URLs for ${country}!`);
+  }, [country, keywords]);
+
+  // Bulk URL Spider
+  const handleBatchScrapeUrls = useCallback(async () => {
+    const urlList = urls
+      .split(/[\n,;]+/)
+      .map(u => u.trim())
+      .filter(u => u.length > 5);
+
+    if (urlList.length === 0) {
+      showToast("Please enter or auto-load target URLs first.");
+      return;
     }
 
-    setError(null);
     setIsLoading(true);
-    stopSearchRef.current = false;
+    setError(null);
+    setProgressMessage(`Spidering & scraping ${urlList.length} company websites...`);
 
     try {
-        setProgressMessage(`Analyzing company profile for ${sourceEmail}...`);
-        const generatedQueries = await analyzeCompanyFromEmail(sourceEmail, country);
-        
-        if (generatedQueries.length > 0) {
-            const newKeywords = generatedQueries.join('\n');
-            setKeywords(newKeywords); // Update UI for visibility
-            
-            setProgressMessage("Company identified. Searching for similar businesses...");
-            await executeSearch(newKeywords);
-        } else {
-            showToast("Could not identify similar companies. Please check the email.");
-        }
+      const res = await fetch('/api/scrape-urls', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ urls: urlList })
+      });
 
-    } catch (e: any) {
-        setError(e.message || 'Failed to analyze email.');
-        showToast("Error analyzing email.");
+      if (!res.ok) {
+        throw new Error(`Scraper request failed with status ${res.status}`);
+      }
+
+      const data = await res.json();
+      const scrapedResults: ExtractedEmail[] = (data.results || []).map((r: any) => ({
+        email: r.email,
+        companyName: r.companyName || (r.email.split('@')[1] ? r.email.split('@')[1].split('.')[0] : 'Company Contact'),
+        sourceUrl: r.sourceUrl,
+        country: country || 'N/A',
+        isValid: true
+      }));
+
+      const { unique, duplicateEmailsCount, duplicateCompaniesCount } = filterDuplicateCompanies(
+        scrapedResults,
+        results,
+        avoidDuplicateCompanies
+      );
+
+      setResults(prev => [...prev, ...unique]);
+      showToast(`Spider extracted ${unique.length} new business emails across ${urlList.length} company domains!`);
+    } catch (err: any) {
+      setError(err.message || 'URL spider encountered an issue.');
+      showToast("URL spider error: Check domain connectivity.");
     } finally {
-        setIsLoading(false);
-        setProgressMessage(null);
+      setIsLoading(false);
+      setProgressMessage(null);
     }
-
-  }, [sourceEmail, country, isLoading, isDeepSearch, verifyDomains]);
+  }, [urls, country, results, avoidDuplicateCompanies]);
 
   const handleClear = () => {
     setResults([]);
@@ -365,7 +392,7 @@ const App: React.FC = () => {
     if (isSuggesting || !keywords.trim()) {
         showToast("Please enter some base keywords first.");
         return;
-    };
+    }
     setIsSuggesting(true);
     try {
         const suggestions = await suggestKeywords(keywords);
@@ -395,10 +422,6 @@ const App: React.FC = () => {
       reader.readAsText(file);
     }
   };
-  
-  const isUrlMode = urls.trim().length > 0;
-  const isKeywordMode = !isUrlMode && !sourceEmail;
-  const isSimilarMode = !isUrlMode && !!sourceEmail && keywords.trim().length === 0; 
 
   const [validatorInitialEmails, setValidatorInitialEmails] = useState<string[]>([]);
 
@@ -435,7 +458,73 @@ const App: React.FC = () => {
               return <SupplyChainExtractor showToast={showToast} />;
           case 'bulk-url-opener':
               return <BulkUrlOpener showToast={showToast} />;
+          case 'file-text-extractor':
+              return (
+                <FileTextContactExtractor
+                  showToast={showToast}
+                  onSendToValidator={handleSendToValidator}
+                  onPushToMainLeads={(leads) => {
+                    setResults(prev => [...prev, ...leads]);
+                    showToast(`Merged ${leads.length} contacts into Main Leads!`);
+                  }}
+                />
+              );
           default:
+              if (extractorMode === 'file-text') {
+                return (
+                  <div className="space-y-5">
+                    {/* TOP STRATEGY SELECTOR BAR */}
+                    <div className="bg-gray-800/80 backdrop-blur-sm border border-gray-700 rounded-xl p-3.5 shadow-lg flex flex-col sm:flex-row items-center justify-between gap-3">
+                      <div className="flex items-center gap-2">
+                        <MagnifyingGlassIcon className="w-5 h-5 text-blue-400" />
+                        <div>
+                          <h2 className="text-sm font-bold text-white leading-tight">Lead Extraction Pipeline</h2>
+                          <p className="text-[11px] text-gray-400">Choose your targeted lead source & extraction strategy</p>
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 p-1 bg-gray-900 rounded-lg border border-gray-700 w-full sm:w-auto">
+                        <button
+                          type="button"
+                          onClick={() => setExtractorMode('dork')}
+                          className="py-1.5 px-3 text-xs font-bold rounded-md transition-all text-center text-gray-400 hover:text-white hover:bg-gray-800"
+                        >
+                          Precision Search
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setExtractorMode('crawler')}
+                          className="py-1.5 px-3 text-xs font-bold rounded-md transition-all text-center text-gray-400 hover:text-white hover:bg-gray-800"
+                        >
+                          1,000+ Leads
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setExtractorMode('urls')}
+                          className="py-1.5 px-3 text-xs font-bold rounded-md transition-all text-center text-gray-400 hover:text-white hover:bg-gray-800"
+                        >
+                          URL Spider
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setExtractorMode('file-text')}
+                          className="py-1.5 px-3 text-xs font-bold rounded-md transition-all text-center bg-emerald-600 text-white shadow-md"
+                        >
+                          File & Text (Email/Phone/Webit)
+                        </button>
+                      </div>
+                    </div>
+
+                    <FileTextContactExtractor
+                      showToast={showToast}
+                      onSendToValidator={handleSendToValidator}
+                      onPushToMainLeads={(leads) => {
+                        setResults(prev => [...prev, ...leads]);
+                        showToast(`Merged ${leads.length} contacts into Main Leads!`);
+                      }}
+                    />
+                  </div>
+                );
+              }
               return (
                 <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
                   {/* EXTRACTOR SIDEBAR */}
@@ -444,28 +533,67 @@ const App: React.FC = () => {
                       <div>
                         <h2 className="text-xl font-bold text-white flex items-center gap-2">
                           <MagnifyingGlassIcon className="w-5 h-5 text-blue-400" />
-                          Targeted Extractor
+                          Targeted Lead Engine
                         </h2>
-                        <p className="text-xs text-gray-400">Precision search syntax & duplicate prevention</p>
+                        <p className="text-xs text-gray-400">Autonomous search crawling & precision spidering</p>
                       </div>
-                      <span className="text-xs px-2.5 py-1 rounded-full font-mono font-bold bg-blue-900/60 text-blue-300 border border-blue-600/50">
-                        site:{currentCcTLD}
-                      </span>
                     </div>
 
-                    {/* STATUS CARD */}
-                    <div className="p-3.5 bg-emerald-950/30 border border-emerald-500/30 rounded-lg space-y-1.5">
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-bold text-emerald-400 flex items-center gap-1.5">
-                          <CheckIcon className="w-4 h-4" /> Native Engine (Unlimited)
-                        </span>
-                        <span className="text-[10px] px-2 py-0.5 rounded font-bold bg-emerald-900/60 text-emerald-300 border border-emerald-600/50">
-                          Original Engine
-                        </span>
+                    {/* PIPELINE MODE SELECTOR */}
+                    <div>
+                      <label className="block text-xs font-bold uppercase tracking-wider text-gray-400 mb-2">
+                        Extraction Strategy:
+                      </label>
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 p-1 bg-gray-900/80 rounded-lg border border-gray-700">
+                        <button
+                          type="button"
+                          onClick={() => setExtractorMode('dork')}
+                          className={`py-2 px-1 text-xs font-bold rounded-md transition-all text-center ${
+                            extractorMode === 'dork'
+                              ? 'bg-blue-600 text-white shadow-md'
+                              : 'text-gray-400 hover:text-white hover:bg-gray-800'
+                          }`}
+                        >
+                          Precision Search
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setExtractorMode('crawler')}
+                          className={`py-2 px-1 text-xs font-bold rounded-md transition-all text-center relative ${
+                            extractorMode === 'crawler'
+                              ? 'bg-amber-600 text-white shadow-md'
+                              : 'text-gray-400 hover:text-white hover:bg-gray-800'
+                          }`}
+                        >
+                          1,000+ Leads
+                          <span className="absolute -top-1.5 -right-1 flex h-2.5 w-2.5">
+                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+                            <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-amber-500"></span>
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setExtractorMode('urls')}
+                          className={`py-2 px-1 text-xs font-bold rounded-md transition-all text-center ${
+                            extractorMode === 'urls'
+                              ? 'bg-teal-600 text-white shadow-md'
+                              : 'text-gray-400 hover:text-white hover:bg-gray-800'
+                          }`}
+                        >
+                          URL Spider
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setExtractorMode('file-text')}
+                          className={`py-2 px-1 text-xs font-bold rounded-md transition-all text-center ${
+                            extractorMode === 'file-text'
+                              ? 'bg-emerald-600 text-white shadow-md'
+                              : 'text-gray-400 hover:text-white hover:bg-gray-800'
+                          }`}
+                        >
+                          File & Text
+                        </button>
                       </div>
-                      <p className="text-xs text-gray-400 leading-relaxed">
-                        Uses standardized precision dorks across 6 web engines (Google, Bing, Brave, DDG, Yahoo, Yandex) and authentic web crawlers. Zero rate limits or token quotas!
-                      </p>
                     </div>
 
                     {/* DUPLICATE CHECKER TOGGLE */}
@@ -475,14 +603,14 @@ const App: React.FC = () => {
                           label="Avoid Duplicate Companies"
                           enabled={avoidDuplicateCompanies}
                           onChange={setAvoidDuplicateCompanies}
-                          disabled={isLoading}
+                          disabled={isLoading || isCrawlerRunning}
                         />
                         <span className="text-xs px-2 py-0.5 rounded font-medium bg-emerald-900/40 text-emerald-300 border border-emerald-700/40">
                           {avoidDuplicateCompanies ? 'Deduplication Active' : 'All Contacts'}
                         </span>
                       </div>
                       <p className="text-xs text-gray-400 leading-relaxed">
-                        Duplicate Checker prevents multiple contacts from the same corporate domain or organization name.
+                        Retains one verified primary contact per corporate domain to keep your lead lists clean.
                       </p>
                     </div>
 
@@ -490,36 +618,42 @@ const App: React.FC = () => {
                     <div>
                       <div className="flex items-center justify-between mb-1">
                         <label htmlFor="country" className="block text-sm font-medium text-gray-300">
-                          Target Country (Required)
+                          Target Country
                         </label>
                         <span className="text-xs text-gray-400 font-mono">
                           ccTLD: <strong className="text-blue-400">.{currentCcTLD}</strong>
                         </span>
                       </div>
-                      <CountrySelector selectedCountry={country} setSelectedCountry={setCountry} disabled={isLoading} />
+                      <CountrySelector selectedCountry={country} setSelectedCountry={setCountry} disabled={isLoading || isCrawlerRunning} />
                     </div>
 
-                    {/* SEARCH ENGINES SELECTOR */}
+                    {/* INDUSTRY & KEYWORDS */}
                     <div>
-                      <div className="flex items-center justify-between mb-2">
-                        <label className="block text-sm font-medium text-gray-300">Search Engine</label>
-                        <span className="text-xs text-gray-400">6 major engines</span>
+                      <div className="flex items-center justify-between mb-1">
+                        <label htmlFor="keywords" className="block text-sm font-medium text-gray-300">
+                          Industry & Keywords
+                        </label>
+                        <span className="text-xs text-gray-400">e.g. shipyard, steel manufacturer</span>
                       </div>
-                      <div className="grid grid-cols-3 gap-1.5">
-                        {SEARCH_ENGINES_LIST.map((eng) => (
-                          <button
-                            key={eng.id}
-                            type="button"
-                            onClick={() => setSelectedEngine(eng.id)}
-                            className={`px-2.5 py-1.5 text-xs font-semibold rounded-md transition-all text-center border ${
-                              selectedEngine === eng.id
-                                ? 'bg-blue-600 text-white border-blue-400 shadow-sm'
-                                : 'bg-gray-700/60 text-gray-300 hover:bg-gray-700 border-gray-600'
-                            }`}
-                          >
-                            {eng.name}
+                      <textarea
+                        id="keywords"
+                        rows={2}
+                        value={keywords}
+                        onChange={(e) => setKeywords(e.target.value)}
+                        placeholder="e.g., 'steel manufacturer'"
+                        disabled={isLoading || isCrawlerRunning}
+                        className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md focus:ring-2 focus:ring-blue-500 transition disabled:cursor-not-allowed resize-y text-sm font-medium text-white"
+                      />
+                      <div className="mt-2 flex items-center gap-2 flex-wrap justify-between">
+                        <div className="flex items-center gap-2">
+                          <button onClick={() => fileInputRef.current?.click()} disabled={isLoading || isCrawlerRunning} className="text-xs text-blue-400 hover:text-blue-300 flex items-center">
+                            <DocumentArrowUpIcon className="w-3.5 h-3.5 mr-1" /> Load File
                           </button>
-                        ))}
+                          <input type="file" ref={fileInputRef} onChange={handleFileChange} accept=".txt" className="hidden" />
+                          <button onClick={handleSuggestKeywords} disabled={isLoading || isCrawlerRunning || isSuggesting} className="text-xs text-yellow-400 hover:text-yellow-300 flex items-center">
+                            <LightbulbIcon className="w-3.5 h-3.5 mr-1" /> Suggest Keywords
+                          </button>
+                        </div>
                       </div>
                     </div>
 
@@ -547,160 +681,269 @@ const App: React.FC = () => {
                       </div>
                     </div>
 
-                    {/* INDUSTRY & KEYWORDS */}
-                    <div>
-                      <div className="flex items-center justify-between mb-1">
-                        <label htmlFor="keywords" className="block text-sm font-medium text-gray-300">
-                          Industry & Keywords
-                        </label>
-                        <span className="text-xs text-gray-400">e.g. shipyard, steel manufacturer</span>
-                      </div>
-                      <textarea
-                        id="keywords"
-                        rows={2}
-                        value={keywords}
-                        onChange={(e) => setKeywords(e.target.value)}
-                        placeholder="e.g., 'steel manufacturer'"
-                        disabled={isLoading || isUrlMode}
-                        className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md focus:ring-2 focus:ring-blue-500 transition disabled:cursor-not-allowed resize-y text-sm font-medium"
-                      />
-                      <div className="mt-2 flex items-center gap-2 flex-wrap justify-between">
-                        <div className="flex items-center gap-2">
-                          <button onClick={() => fileInputRef.current?.click()} disabled={isLoading || isUrlMode} className="text-xs text-blue-400 hover:text-blue-300 flex items-center">
-                            <DocumentArrowUpIcon className="w-3.5 h-3.5 mr-1" /> Load File
+                    {/* MODE 1: PRECISION DORK / SEARCH */}
+                    {extractorMode === 'dork' && (
+                      <div className="space-y-4 pt-1">
+                        {/* SEARCH ENGINES SELECTOR */}
+                        <div>
+                          <div className="flex items-center justify-between mb-1.5">
+                            <label className="block text-xs font-bold uppercase tracking-wider text-gray-400">Search Engine</label>
+                            <span className="text-xs text-gray-400">6 major engines</span>
+                          </div>
+                          <div className="grid grid-cols-3 gap-1.5">
+                            {SEARCH_ENGINES_LIST.map((eng) => (
+                              <button
+                                key={eng.id}
+                                type="button"
+                                onClick={() => setSelectedEngine(eng.id)}
+                                className={`px-2 py-1 text-xs font-semibold rounded-md transition-all text-center border ${
+                                  selectedEngine === eng.id
+                                    ? 'bg-blue-600 text-white border-blue-400 shadow-sm'
+                                    : 'bg-gray-700/60 text-gray-300 hover:bg-gray-700 border-gray-600'
+                                }`}
+                              >
+                                {eng.name}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* LIVE DORK QUERY PREVIEW */}
+                        <div className="bg-gray-900/90 border border-gray-700 rounded-lg p-3 space-y-2">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-bold uppercase tracking-wider text-gray-400 flex items-center gap-1">
+                              <GlobeAltIcon className="w-3.5 h-3.5 text-blue-400" />
+                              Generated Query:
+                            </span>
+                            <button
+                              type="button"
+                              onClick={handleCopyDork}
+                              className="text-xs text-gray-300 hover:text-white flex items-center gap-1 bg-gray-800 px-2 py-0.5 rounded border border-gray-700"
+                            >
+                              {dorkCopied ? <CheckIcon className="w-3 h-3 text-green-400" /> : <ClipboardIcon className="w-3 h-3" />}
+                              {dorkCopied ? 'Copied' : 'Copy'}
+                            </button>
+                          </div>
+                          <div className="bg-black/60 p-2 rounded font-mono text-xs text-emerald-400 break-all select-all border border-gray-800">
+                            {currentDorkQuery}
+                          </div>
+                        </div>
+
+                        {/* ACTION BUTTONS */}
+                        <div className="space-y-2">
+                          <button
+                            type="button"
+                            onClick={handleDorkDirectSearch}
+                            disabled={isLoading}
+                            className="w-full py-2.5 px-4 text-sm font-bold rounded-lg bg-blue-600 hover:bg-blue-700 text-white shadow-lg transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+                          >
+                            <MagnifyingGlassIcon className="w-4 h-4" />
+                            {isLoading ? 'Searching Web Index...' : 'Run Search & Extract Emails'}
                           </button>
-                          <input type="file" ref={fileInputRef} onChange={handleFileChange} accept=".txt" className="hidden" />
-                          <button onClick={handleSuggestKeywords} disabled={isLoading || isUrlMode || isSuggesting} className="text-xs text-yellow-400 hover:text-yellow-300 flex items-center">
-                            <LightbulbIcon className="w-3.5 h-3.5 mr-1" /> Suggest Keywords
+
+                          <div className="grid grid-cols-2 gap-2">
+                            <button
+                              type="button"
+                              onClick={() => handleLaunchEngine(selectedEngine)}
+                              disabled={isLoading}
+                              className="py-2 px-3 text-xs font-bold rounded-lg bg-gray-700 hover:bg-gray-600 text-white transition-all border border-gray-600 flex items-center justify-center gap-1.5 truncate"
+                            >
+                              <GlobeAltIcon className="w-3.5 h-3.5 text-blue-400" />
+                              Launch in {selectedEngine === 'all' ? 'All' : SEARCH_ENGINES_LIST.find(e => e.id === selectedEngine)?.name}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleLaunchEngine('all')}
+                              disabled={isLoading}
+                              className="py-2 px-3 text-xs font-bold rounded-lg bg-indigo-700/80 hover:bg-indigo-600 text-white transition-all border border-indigo-500/50 flex items-center justify-center gap-1.5 truncate"
+                            >
+                              Open All 6 Engines
+                            </button>
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={() => setIsPasteModalOpen(true)}
+                            disabled={isLoading}
+                            className="w-full py-2 px-3 text-xs font-semibold rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-200 transition-all border border-gray-700 flex items-center justify-center gap-1.5"
+                          >
+                            <DocumentArrowUpIcon className="w-4 h-4 text-emerald-400" />
+                            Paste Search Results / Snippets
                           </button>
                         </div>
                       </div>
-                    </div>
+                    )}
 
-                    {/* QUICK EXAMPLE PRESETS */}
-                    <div className="p-3 bg-gray-900/60 border border-gray-700/80 rounded-lg">
-                      <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">
-                        Target Country Presets:
-                      </p>
-                      <div className="space-y-1.5">
+                    {/* MODE 2: AUTONOMOUS 1,000+ LEADS PIPELINE */}
+                    {extractorMode === 'crawler' && (
+                      <div className="space-y-4 pt-1">
+                        <div className="p-3 bg-amber-950/40 border border-amber-600/40 rounded-lg space-y-2">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-bold text-amber-300 flex items-center gap-1.5">
+                              ★ 1,000+ Leads Autonomous Pipeline
+                            </span>
+                            <span className="text-[10px] px-2 py-0.5 rounded bg-amber-900/60 text-amber-200 border border-amber-600/50 font-mono">
+                              Deep Matrix
+                            </span>
+                          </div>
+                          <p className="text-xs text-amber-200/80 leading-relaxed">
+                            Autonomously expands queries across {country}&apos;s industrial hubs and directories to harvest over 1,000 verified leads without browser hanging.
+                          </p>
+
+                          <div>
+                            <label className="block text-xs font-medium text-amber-300 mb-1">Target Lead Goal:</label>
+                            <select
+                              value={targetGoal}
+                              onChange={(e) => setTargetGoal(Number(e.target.value))}
+                              disabled={isCrawlerRunning}
+                              className="w-full px-3 py-1.5 bg-gray-900 border border-amber-600/50 rounded-lg text-xs font-bold text-amber-300 focus:outline-none"
+                            >
+                              <option value={100}>100 Leads (Fast Sprint)</option>
+                              <option value={250}>250 Leads</option>
+                              <option value={500}>500 Leads (Standard Pipeline)</option>
+                              <option value={1000}>1,000 Leads (Recommended Scale)</option>
+                              <option value={2500}>2,500 Leads (Deep Industrial Harvest)</option>
+                            </select>
+                          </div>
+                        </div>
+
+                        {/* Live Crawler Telemetry Panel */}
+                        {isCrawlerRunning && crawlerProgress && (
+                          <div className="p-3.5 bg-gray-900 border border-amber-500/40 rounded-xl space-y-3 shadow-xl">
+                            <div className="flex items-center justify-between text-xs">
+                              <span className="font-bold text-amber-300 flex items-center gap-1.5">
+                                <ArrowPathIcon className="w-4 h-4 animate-spin text-amber-400" />
+                                {crawlerProgress.isPaused ? 'Crawler Paused' : 'Crawling Live Index...'}
+                              </span>
+                              <span className="font-mono text-gray-300 font-bold">
+                                {crawlerProgress.currentCount} / {crawlerProgress.targetGoal} Leads ({crawlerProgress.percent}%)
+                              </span>
+                            </div>
+
+                            <div className="w-full bg-gray-800 h-2.5 rounded-full overflow-hidden">
+                              <div
+                                className="bg-amber-500 h-full transition-all duration-300"
+                                style={{ width: `${crawlerProgress.percent}%` }}
+                              ></div>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-2 text-[11px] text-gray-400">
+                              <div>Unique Companies: <strong className="text-white">{crawlerProgress.uniqueCompanies}</strong></div>
+                              <div>Crawled URLs: <strong className="text-white">{crawlerProgress.crawledUrls}</strong></div>
+                              <div className="col-span-2 truncate" title={crawlerProgress.activeQuery}>
+                                Active Dork: <span className="text-emerald-400 font-mono">{crawlerProgress.activeQuery}</span>
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-2 pt-1">
+                              <button
+                                type="button"
+                                onClick={handleTogglePauseCrawler}
+                                className="flex-1 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-200 font-bold text-xs rounded border border-gray-600 flex items-center justify-center gap-1"
+                              >
+                                {crawlerProgress.isPaused ? <PlayIcon className="w-3.5 h-3.5 text-green-400" /> : <PauseIcon className="w-3.5 h-3.5 text-yellow-400" />}
+                                {crawlerProgress.isPaused ? 'Resume' : 'Pause'}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={handleStopCrawler}
+                                className="flex-1 py-1.5 bg-red-600/30 hover:bg-red-600 text-red-300 hover:text-white font-bold text-xs rounded border border-red-500/40 flex items-center justify-center gap-1"
+                              >
+                                <StopIcon className="w-3.5 h-3.5" />
+                                Stop & Keep
+                              </button>
+                            </div>
+                          </div>
+                        )}
+
+                        {!isCrawlerRunning && (
+                          <button
+                            type="button"
+                            onClick={handleStartCrawler}
+                            disabled={isLoading}
+                            className="w-full py-3 px-4 text-sm font-bold rounded-lg bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-500 hover:to-orange-500 text-white shadow-xl transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+                          >
+                            <SparklesIcon className="w-5 h-5 text-amber-200" />
+                            Launch Autonomous {targetGoal.toLocaleString()}+ Lead Pipeline
+                          </button>
+                        )}
+                      </div>
+                    )}
+
+                    {/* MODE 3: DIRECT BULK URL AUTO-LOADER & SPIDER */}
+                    {extractorMode === 'urls' && (
+                      <div className="space-y-4 pt-1">
+                        <div className="p-3 bg-teal-950/40 border border-teal-600/40 rounded-lg space-y-2">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-bold text-teal-300 flex items-center gap-1.5">
+                              🌐 Direct URL Batch Spider
+                            </span>
+                            <span className="text-[10px] px-2 py-0.5 rounded bg-teal-900/60 text-teal-200 border border-teal-600/50 font-mono">
+                              Up to 150 URLs
+                            </span>
+                          </div>
+                          <p className="text-xs text-teal-200/80 leading-relaxed">
+                            Spiders target websites and follows /contact, /impressum, /about, and /kontakt to extract verified corporate emails.
+                          </p>
+
+                          <button
+                            type="button"
+                            onClick={handleAutoLoadTargetUrls}
+                            disabled={isLoading}
+                            className="w-full py-2 px-3 bg-teal-600 hover:bg-teal-500 text-white rounded-lg text-xs font-bold transition-all shadow flex items-center justify-center gap-1.5"
+                          >
+                            ⚡ Auto-Generate & Load 30+ Target URLs
+                          </button>
+                        </div>
+
+                        <div>
+                          <div className="flex items-center justify-between mb-1">
+                            <label className="block text-xs font-bold uppercase tracking-wider text-gray-400">
+                              Target URLs / Domains:
+                            </label>
+                            <span className="text-xs text-teal-400 font-mono">
+                              {urls.split('\n').filter(u => u.trim().length > 5).length} URLs loaded
+                            </span>
+                          </div>
+                          <textarea
+                            rows={6}
+                            value={urls}
+                            onChange={(e) => setUrls(e.target.value)}
+                            placeholder="Enter or paste URLs (e.g. https://company.de, https://steel-mfg.com)"
+                            disabled={isLoading}
+                            className="w-full p-2.5 bg-gray-900 border border-gray-700 rounded-lg font-mono text-xs text-teal-300 focus:ring-1 focus:ring-teal-500 focus:outline-none"
+                          />
+                        </div>
+
                         <button
                           type="button"
-                          onClick={() => handleApplyPreset('Germany', 'steel manufacturer', 'info@')}
-                          className="w-full text-left text-xs font-mono px-2 py-1 rounded bg-gray-800 hover:bg-gray-700/80 text-blue-300 truncate border border-gray-700 block"
+                          onClick={handleBatchScrapeUrls}
+                          disabled={isLoading || !urls.trim()}
+                          className="w-full py-2.5 px-4 text-sm font-bold rounded-lg bg-teal-600 hover:bg-teal-500 text-white shadow-lg transition-all disabled:opacity-50 flex items-center justify-center gap-2"
                         >
-                          🇩🇪 site:de steel manufacturer ... info@
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleApplyPreset('China', 'shipyard', 'info@')}
-                          className="w-full text-left text-xs font-mono px-2 py-1 rounded bg-gray-800 hover:bg-gray-700/80 text-cyan-300 truncate border border-gray-700 block"
-                        >
-                          🇨🇳 site:cn shipyard ... info@
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleApplyPreset('Italy', 'pharmaceutical equipment manufacturer', '@')}
-                          className="w-full text-left text-xs font-mono px-2 py-1 rounded bg-gray-800 hover:bg-gray-700/80 text-emerald-300 truncate border border-gray-700 block"
-                        >
-                          🇮🇹 site:it pharmaceutical equipment ... @
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleApplyPreset('Japan', 'marine engine manufacturer', '@')}
-                          className="w-full text-left text-xs font-mono px-2 py-1 rounded bg-gray-800 hover:bg-gray-700/80 text-amber-300 truncate border border-gray-700 block"
-                        >
-                          🇯🇵 site:jp marine engine manufacturer ... @
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleApplyPreset('South Korea', 'shipbuilding company', '@')}
-                          className="w-full text-left text-xs font-mono px-2 py-1 rounded bg-gray-800 hover:bg-gray-700/80 text-rose-300 truncate border border-gray-700 block"
-                        >
-                          🇰🇷 site:kr shipbuilding company ... @
+                          <GlobeAltIcon className="w-4 h-4" />
+                          {isLoading ? 'Spidering URLs...' : 'Spider & Extract All URLs'}
                         </button>
                       </div>
-                    </div>
+                    )}
 
-                    {/* LIVE DORK QUERY PREVIEW */}
-                    <div className="bg-gray-900/90 border border-gray-700 rounded-lg p-3 space-y-2">
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-bold uppercase tracking-wider text-gray-400 flex items-center gap-1">
-                          <GlobeAltIcon className="w-3.5 h-3.5 text-blue-400" />
-                          Generated Search Query:
-                        </span>
-                        <button
-                          type="button"
-                          onClick={handleCopyDork}
-                          className="text-xs text-gray-300 hover:text-white flex items-center gap-1 bg-gray-800 px-2 py-0.5 rounded border border-gray-700"
-                        >
-                          {dorkCopied ? <CheckIcon className="w-3 h-3 text-green-400" /> : <ClipboardIcon className="w-3 h-3" />}
-                          {dorkCopied ? 'Copied' : 'Copy'}
-                        </button>
-                      </div>
-                      <div className="bg-black/60 p-2.5 rounded font-mono text-xs text-emerald-400 break-all select-all border border-gray-800">
-                        {currentDorkQuery}
-                      </div>
-                    </div>
-
-                    {/* ACTION BUTTONS */}
-                    <div className="space-y-2.5 pt-1">
-                      <button
+                    {/* STOP SEARCH BUTTON */}
+                    {isLoading && !isCrawlerRunning && (
+                      <button 
                         type="button"
-                        onClick={handleDorkDirectSearch}
-                        disabled={isLoading}
-                        className="w-full py-2.5 px-4 text-sm font-bold rounded-lg bg-blue-600 hover:bg-blue-700 text-white shadow-lg transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+                        onClick={handleStopSearch} 
+                        className="w-full flex items-center justify-center py-2 px-4 text-xs font-bold rounded-lg bg-red-600/80 hover:bg-red-600 text-white shadow-lg transition-all border border-red-500"
                       >
-                        <MagnifyingGlassIcon className="w-4 h-4" />
-                        {isLoading ? 'Searching Web Index...' : 'Run Search & Extract Emails'}
+                        <XCircleIcon className="w-4 h-4 mr-1.5" /> Stop Current Operation
                       </button>
-
-                      <div className="grid grid-cols-2 gap-2">
-                        <button
-                          type="button"
-                          onClick={() => handleLaunchEngine(selectedEngine)}
-                          disabled={isLoading}
-                          className="py-2 px-3 text-xs font-bold rounded-lg bg-gray-700 hover:bg-gray-600 text-white transition-all border border-gray-600 flex items-center justify-center gap-1.5 truncate"
-                        >
-                          <GlobeAltIcon className="w-3.5 h-3.5 text-blue-400" />
-                          Launch in {selectedEngine === 'all' ? 'All' : SEARCH_ENGINES_LIST.find(e => e.id === selectedEngine)?.name}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleLaunchEngine('all')}
-                          disabled={isLoading}
-                          className="py-2 px-3 text-xs font-bold rounded-lg bg-indigo-700/80 hover:bg-indigo-600 text-white transition-all border border-indigo-500/50 flex items-center justify-center gap-1.5 truncate"
-                        >
-                          Open All 6 Engines
-                        </button>
-                      </div>
-
-                      <button
-                        type="button"
-                        onClick={() => setIsPasteModalOpen(true)}
-                        disabled={isLoading}
-                        className="w-full py-2 px-3 text-xs font-semibold rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-200 transition-all border border-gray-700 flex items-center justify-center gap-1.5"
-                      >
-                        <DocumentArrowUpIcon className="w-4 h-4 text-emerald-400" />
-                        Paste Search Results / Snippets
-                      </button>
-
-                      {isLoading && (
-                        <button 
-                          type="button"
-                          onClick={handleStopSearch} 
-                          className="w-full flex items-center justify-center py-2 px-4 text-xs font-bold rounded-lg bg-red-600/80 hover:bg-red-600 text-white shadow-lg transition-all border border-red-500"
-                        >
-                          <XCircleIcon className="w-4 h-4 mr-1.5" /> Stop Search
-                        </button>
-                      )}
-                    </div>
+                    )}
                   </div>
 
                   {/* EXTRACTOR RESULTS */}
                   <div className="lg:col-span-8">
                     <ResultsDisplay 
                       results={results} 
-                      isLoading={isLoading} 
+                      isLoading={isLoading || isCrawlerRunning} 
                       error={error} 
                       progressMessage={progressMessage} 
                       onClearResults={handleClear} 
@@ -712,7 +955,7 @@ const App: React.FC = () => {
                 </div>
               );
       }
-  }
+  };
 
   return (
     <>
@@ -741,12 +984,12 @@ const App: React.FC = () => {
             </div>
             <div className="inline-flex items-center justify-center">
                 <SparklesIcon className="w-10 h-10 text-blue-400" />
-                <h1 className="text-4xl sm:text-5xl font-extrabold ml-3 bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-teal-300">
-                Email Extractor Pro
+                <h1 className="text-4xl sm:text-5xl font-extrabold ml-3 bg-clip-text text-transparent bg-gradient-to-r from-blue-400 via-teal-300 to-indigo-400">
+                  Email Extractor Pro
                 </h1>
             </div>
-            <p className="mt-2 max-w-2xl mx-auto text-lg text-gray-400">
-              Precision Search Engine Dorking, Web Crawlers & Native SMTP Verification
+            <p className="mt-2 max-w-2xl mx-auto text-sm sm:text-base text-gray-400">
+              High-Volume Search Engine Crawlers, Bulk URL Spiders & Deep Domain Verification
             </p>
           </header>
 
@@ -755,29 +998,43 @@ const App: React.FC = () => {
              <div className="bg-gray-800/50 p-1 rounded-xl inline-flex shadow-xl border border-gray-700 flex-wrap justify-center">
                 <button
                   onClick={() => setActiveTab('extractor')}
-                  className={`flex items-center px-6 py-2.5 rounded-lg text-sm font-bold transition-all duration-200 ${
+                  className={`flex items-center px-5 py-2.5 rounded-lg text-sm font-bold transition-all duration-200 ${
                     activeTab === 'extractor' 
                     ? 'bg-blue-600 text-white shadow-md' 
                     : 'text-gray-400 hover:text-white hover:bg-gray-700/50'
                   }`}
                 >
                   <ListBulletIcon className="w-4 h-4 mr-2" />
-                  Extractor
+                  Lead Extractor
+                </button>
+                <button
+                  onClick={() => setActiveTab('file-text-extractor')}
+                  className={`flex items-center px-4 py-2.5 rounded-lg text-sm font-bold transition-all duration-200 ${
+                    activeTab === 'file-text-extractor' 
+                    ? 'bg-emerald-600 text-white shadow-md' 
+                    : 'text-gray-400 hover:text-white hover:bg-gray-700/50'
+                  }`}
+                >
+                  <DocumentArrowUpIcon className="w-4 h-4 mr-1.5 text-emerald-300" />
+                  File & Text Extractor
+                  <span className="ml-1.5 px-1.5 py-0.5 text-[10px] bg-emerald-950 text-emerald-200 rounded border border-emerald-500/40">
+                    Email • Phone • Webit
+                  </span>
                 </button>
                 <button
                   onClick={() => setActiveTab('bulk-extractor')}
-                  className={`flex items-center px-6 py-2.5 rounded-lg text-sm font-bold transition-all duration-200 ${
+                  className={`flex items-center px-5 py-2.5 rounded-lg text-sm font-bold transition-all duration-200 ${
                     activeTab === 'bulk-extractor' 
-                    ? 'bg-blue-600 text-white shadow-md' 
+                    ? 'bg-teal-600 text-white shadow-md' 
                     : 'text-gray-400 hover:text-white hover:bg-gray-700/50'
                   }`}
                 >
                   <FolderOpenIcon className="w-4 h-4 mr-2" />
-                  Folder Extractor
+                  Folder & Bulky File Extractor
                 </button>
                 <button
                   onClick={() => setActiveTab('sorter')}
-                  className={`flex items-center px-6 py-2.5 rounded-lg text-sm font-bold transition-all duration-200 ${
+                  className={`flex items-center px-5 py-2.5 rounded-lg text-sm font-bold transition-all duration-200 ${
                     activeTab === 'sorter' 
                     ? 'bg-blue-600 text-white shadow-md' 
                     : 'text-gray-400 hover:text-white hover:bg-gray-700/50'
@@ -788,18 +1045,21 @@ const App: React.FC = () => {
                 </button>
                 <button
                   onClick={() => setActiveTab('analyzer')}
-                  className={`flex items-center px-6 py-2.5 rounded-lg text-sm font-bold transition-all duration-200 ${
+                  className={`flex items-center px-5 py-2.5 rounded-lg text-sm font-bold transition-all duration-200 relative ${
                     activeTab === 'analyzer' 
                     ? 'bg-purple-600 text-white shadow-md' 
                     : 'text-gray-400 hover:text-white hover:bg-gray-700/50'
                   }`}
                 >
-                  <BriefcaseIcon className="w-4 h-4 mr-2" />
+                  <BriefcaseIcon className="w-4 h-4 mr-2 text-purple-300" />
                   Industry Analyzer
+                  <span className="ml-1.5 px-1.5 py-0.2 text-[10px] bg-purple-900 text-purple-200 rounded border border-purple-500/40">
+                    Google + Meta
+                  </span>
                 </button>
                 <button
                   onClick={() => setActiveTab('validator')}
-                  className={`flex items-center px-6 py-2.5 rounded-lg text-sm font-bold transition-all duration-200 ${
+                  className={`flex items-center px-5 py-2.5 rounded-lg text-sm font-bold transition-all duration-200 ${
                     activeTab === 'validator' 
                     ? 'bg-orange-600 text-white shadow-md' 
                     : 'text-gray-400 hover:text-white hover:bg-gray-700/50'
@@ -810,7 +1070,7 @@ const App: React.FC = () => {
                 </button>
                 <button
                   onClick={() => setActiveTab('mx-sorter')}
-                  className={`flex items-center px-6 py-2.5 rounded-lg text-sm font-bold transition-all duration-200 ${
+                  className={`flex items-center px-5 py-2.5 rounded-lg text-sm font-bold transition-all duration-200 ${
                     activeTab === 'mx-sorter' 
                     ? 'bg-blue-800 text-white shadow-md' 
                     : 'text-gray-400 hover:text-white hover:bg-gray-700/50'
@@ -821,7 +1081,7 @@ const App: React.FC = () => {
                 </button>
                 <button
                   onClick={() => setActiveTab('supply-chain')}
-                  className={`flex items-center px-6 py-2.5 rounded-lg text-sm font-bold transition-all duration-200 ${
+                  className={`flex items-center px-5 py-2.5 rounded-lg text-sm font-bold transition-all duration-200 ${
                     activeTab === 'supply-chain' 
                     ? 'bg-purple-800 text-white shadow-md' 
                     : 'text-gray-400 hover:text-white hover:bg-gray-700/50'
@@ -832,7 +1092,7 @@ const App: React.FC = () => {
                 </button>
                 <button
                   onClick={() => setActiveTab('bulk-url-opener')}
-                  className={`flex items-center px-6 py-2.5 rounded-lg text-sm font-bold transition-all duration-200 ${
+                  className={`flex items-center px-5 py-2.5 rounded-lg text-sm font-bold transition-all duration-200 ${
                     activeTab === 'bulk-url-opener' 
                     ? 'bg-blue-600 text-white shadow-md' 
                     : 'text-gray-400 hover:text-white hover:bg-gray-700/50'
@@ -884,6 +1144,17 @@ const App: React.FC = () => {
                 Country: <strong className="text-blue-400">{country || 'Default'}</strong> • Avoid Duplicate Companies: <strong className={avoidDuplicateCompanies ? "text-emerald-400" : "text-gray-400"}>{avoidDuplicateCompanies ? "Enabled" : "Disabled"}</strong>
               </span>
               <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsPasteModalOpen(false);
+                    setActiveTab('file-text-extractor');
+                  }}
+                  className="px-3 py-2 text-xs font-semibold rounded-lg bg-teal-900/40 text-teal-300 hover:bg-teal-900/70 border border-teal-600/50"
+                  title="Extract emails, phone numbers, and webmail links"
+                >
+                  Deep Multi-Extractor (Email • Phone • Webit)
+                </button>
                 <button
                   type="button"
                   onClick={() => setIsPasteModalOpen(false)}
