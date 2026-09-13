@@ -104,14 +104,24 @@ export const FileTextContactExtractor: React.FC<FileTextContactExtractorProps> =
   const domainMXCache = useRef<Map<string, MXCheckResult>>(new Map());
   const abortMXRef = useRef<boolean>(false);
 
+  // References to eliminate circular re-render loops
+  const contactsRef = useRef<ExtractedContactItem[]>([]);
+  contactsRef.current = contacts;
+  const pastedTextRef = useRef(pastedText);
+  pastedTextRef.current = pastedText;
+  const selectedFilesRef = useRef(selectedFiles);
+  selectedFilesRef.current = selectedFiles;
+  const fileRawTextCacheRef = useRef(fileRawTextCache);
+  fileRawTextCacheRef.current = fileRawTextCache;
+
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Perform Quick MX Check on extracted emails
+  // Perform Quick MX Check on extracted emails (stable identity - no contacts dependency)
   const performMXCheck = useCallback(async (
     targetContacts?: ExtractedContactItem[],
     forceAll = false
   ) => {
-    const list = targetContacts || contacts;
+    const list = targetContacts || contactsRef.current;
     const emailItems = list.filter(c => c.type === 'email');
     if (emailItems.length === 0) {
       if (forceAll) {
@@ -193,7 +203,7 @@ export const FileTextContactExtractor: React.FC<FileTextContactExtractorProps> =
     if (!abortMXRef.current && forceAll) {
       showToast(`Quick MX check finished: ${validCount} active MX, ${deadCount} dead/no-MX.`);
     }
-  }, [contacts, showToast]);
+  }, [showToast]);
 
   // Check single email MX
   const checkSingleEmailMX = async (item: ExtractedContactItem) => {
@@ -219,10 +229,18 @@ export const FileTextContactExtractor: React.FC<FileTextContactExtractorProps> =
     showToast(`MX for ${domain}: ${res.hasMx ? `Active (${res.provider})` : 'Dead / No MX'}`);
   };
 
-  // Re-run extraction whenever checkboxes change or text/files update
+  // Run extraction using current filters and inputs
   const runExtraction = useCallback(async () => {
     // If no checkbox is checked
     if (!extractEmail && !extractPhone && !extractWeb) {
+      setContacts([]);
+      return;
+    }
+
+    const currentText = pastedTextRef.current;
+    const currentFiles = selectedFilesRef.current;
+
+    if (!currentText.trim() && currentFiles.length === 0) {
       setContacts([]);
       return;
     }
@@ -244,21 +262,21 @@ export const FileTextContactExtractor: React.FC<FileTextContactExtractorProps> =
       const allExtracted: ExtractedContactItem[] = [];
 
       // 1. Process Pasted Text if present
-      if (pastedText.trim().length > 0) {
-        const textItems = extractContactsFromText(pastedText, filterOptions, 'Pasted Text');
+      if (currentText.trim().length > 0) {
+        const textItems = extractContactsFromText(currentText, filterOptions, 'Pasted Text');
         allExtracted.push(...textItems);
       }
 
       // 2. Process Uploaded Files if present
-      if (selectedFiles.length > 0) {
-        for (const file of selectedFiles) {
-          // Use cache if available to avoid re-reading disk
-          let rawText = fileRawTextCache[file.name];
+      if (currentFiles.length > 0) {
+        for (const file of currentFiles) {
+          let rawText = fileRawTextCacheRef.current[file.name];
           if (rawText) {
             const fileItems = extractContactsFromText(rawText, filterOptions, file.name);
             allExtracted.push(...fileItems);
           } else {
             const res = await extractContactsFromFile(file, filterOptions);
+            fileRawTextCacheRef.current[file.name] = res.rawText;
             setFileRawTextCache(prev => ({ ...prev, [file.name]: res.rawText }));
             allExtracted.push(...res.contacts);
           }
@@ -284,9 +302,7 @@ export const FileTextContactExtractor: React.FC<FileTextContactExtractorProps> =
 
       // Auto MX Check trigger for newly extracted emails
       if (autoCheckMX && finalItems.some(item => item.type === 'email')) {
-        setTimeout(() => {
-          performMXCheck(finalItems, false);
-        }, 100);
+        performMXCheck(finalItems, false);
       }
     } catch (err: any) {
       console.error("Extraction error:", err);
@@ -300,20 +316,28 @@ export const FileTextContactExtractor: React.FC<FileTextContactExtractorProps> =
     extractWeb,
     webmailOnly,
     deduplicate,
-    pastedText,
-    selectedFiles,
-    fileRawTextCache,
     autoCheckMX,
     performMXCheck,
     showToast
   ]);
 
-  // Reactive trigger: whenever checkboxes change, immediately re-extract content from current file/text
+  // Reactive trigger: when filter checkboxes change, re-run extraction
   useEffect(() => {
-    if (pastedText.trim().length > 0 || selectedFiles.length > 0) {
-      runExtraction();
-    }
+    runExtraction();
   }, [extractEmail, extractPhone, extractWeb, webmailOnly, deduplicate, runExtraction]);
+
+  // Debounced trigger when pasted text changes (avoids re-rendering on every keystroke)
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      runExtraction();
+    }, 280);
+    return () => clearTimeout(timer);
+  }, [pastedText, runExtraction]);
+
+  // Reactive trigger when files are added or removed
+  useEffect(() => {
+    runExtraction();
+  }, [selectedFiles, runExtraction]);
 
   // Handle file selection
   const handleFilesSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -961,34 +985,34 @@ export const FileTextContactExtractor: React.FC<FileTextContactExtractorProps> =
           <div>
             {/* KPI STATS BAR */}
             <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 mb-4">
-              <div className="p-3 bg-gray-900 border border-gray-700 rounded-xl text-center">
+              <div className="p-3 bg-gray-900 border border-gray-700 rounded-xl text-center min-h-[76px] flex flex-col justify-center">
                 <span className="text-[11px] text-gray-400 font-medium block">Total Extracted</span>
                 <span className="text-xl font-extrabold text-white font-mono">{contacts.length}</span>
               </div>
-              <div className="p-3 bg-gray-900 border border-blue-600/30 rounded-xl text-center">
+              <div className="p-3 bg-gray-900 border border-blue-600/30 rounded-xl text-center min-h-[76px] flex flex-col justify-center">
                 <span className="text-[11px] text-blue-400 font-medium block flex items-center justify-center gap-1">
                   <Mail className="w-3 h-3" /> Emails
                 </span>
                 <span className="text-xl font-extrabold text-blue-300 font-mono">{emailCount}</span>
               </div>
-              <div className="p-3 bg-gray-900 border border-emerald-600/30 rounded-xl text-center">
+              <div className="p-3 bg-gray-900 border border-emerald-600/30 rounded-xl text-center min-h-[76px] flex flex-col justify-center">
                 <span className="text-[11px] text-emerald-400 font-medium block flex items-center justify-center gap-1">
                   <Phone className="w-3 h-3" /> Phones
                 </span>
                 <span className="text-xl font-extrabold text-emerald-300 font-mono">{phoneCount}</span>
               </div>
-              <div className="p-3 bg-gray-900 border border-purple-600/30 rounded-xl text-center">
+              <div className="p-3 bg-gray-900 border border-purple-600/30 rounded-xl text-center min-h-[76px] flex flex-col justify-center">
                 <span className="text-[11px] text-purple-400 font-medium block flex items-center justify-center gap-1">
                   <Globe className="w-3 h-3" /> Webit / URLs
                 </span>
                 <span className="text-xl font-extrabold text-purple-300 font-mono">{webTotalCount}</span>
               </div>
-              <div className="p-3 bg-gray-900 border border-indigo-600/30 rounded-xl text-center flex flex-col justify-center">
+              <div className="p-3 bg-gray-900 border border-indigo-600/30 rounded-xl text-center flex flex-col justify-center min-h-[76px]">
                 <span className="text-[11px] text-indigo-400 font-medium block flex items-center justify-center gap-1">
                   <ShieldCheck className="w-3 h-3" /> MX Health
                 </span>
                 {isCheckingMX ? (
-                  <span className="text-xs font-bold text-blue-300 animate-pulse flex items-center justify-center gap-1 mt-1">
+                  <span className="text-xs font-bold text-blue-300 flex items-center justify-center gap-1 mt-1">
                     <RefreshCw className="w-3 h-3 animate-spin" />
                     {mxProgress ? `${mxProgress.current}/${mxProgress.total}` : 'Checking...'}
                   </span>
@@ -1003,7 +1027,7 @@ export const FileTextContactExtractor: React.FC<FileTextContactExtractorProps> =
                 ) : emailCount > 0 ? (
                   <button
                     type="button"
-                    onClick={() => performMXCheck(contacts, true)}
+                    onClick={() => performMXCheck(undefined, true)}
                     className="mt-1 px-2 py-0.5 text-[10px] font-bold rounded bg-blue-900/50 hover:bg-blue-800 text-blue-300 border border-blue-600/40 transition"
                   >
                     Run Quick Check
@@ -1128,21 +1152,21 @@ export const FileTextContactExtractor: React.FC<FileTextContactExtractorProps> =
             <div className="mt-3 border border-gray-700/80 rounded-xl overflow-hidden bg-gray-900/70">
               {filteredContacts.length > 0 ? (
                 <div className="max-h-[380px] overflow-y-auto">
-                  <table className="w-full text-left text-xs border-collapse">
+                  <table className="w-full text-left text-xs border-collapse table-fixed">
                     <thead className="bg-gray-950/90 text-gray-400 uppercase font-mono text-[10px] sticky top-0 z-10 border-b border-gray-800">
                       <tr>
-                        <th className="py-2.5 px-3">Type</th>
-                        <th className="py-2.5 px-3">Contact Information</th>
-                        <th className="py-2.5 px-3">Classification</th>
-                        <th className="py-2.5 px-3">MX Record</th>
-                        <th className="py-2.5 px-3">Source</th>
-                        <th className="py-2.5 px-3 text-right">Actions</th>
+                        <th className="py-2.5 px-3 w-[100px] min-w-[100px]">Type</th>
+                        <th className="py-2.5 px-3 min-w-[180px]">Contact Information</th>
+                        <th className="py-2.5 px-3 w-[130px] min-w-[130px]">Classification</th>
+                        <th className="py-2.5 px-3 w-[170px] min-w-[170px]">MX Record</th>
+                        <th className="py-2.5 px-3 w-[110px] min-w-[110px]">Source</th>
+                        <th className="py-2.5 px-3 w-[85px] min-w-[85px] text-right">Actions</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-800/80">
                       {filteredContacts.map((item) => (
                         <tr key={item.id} className="hover:bg-gray-800/50 transition-colors">
-                          <td className="py-2.5 px-3 whitespace-nowrap">
+                          <td className="py-2.5 px-3 whitespace-nowrap w-[100px]">
                             {item.type === 'email' && (
                               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-900/40 text-blue-300 border border-blue-700/50 font-mono">
                                 <Mail className="w-2.5 h-2.5" /> EMAIL
@@ -1195,27 +1219,27 @@ export const FileTextContactExtractor: React.FC<FileTextContactExtractorProps> =
                             )}
                           </td>
 
-                          <td className="py-2.5 px-3 text-gray-400">
-                            <span className="text-[11px] font-medium text-gray-300">
+                          <td className="py-2.5 px-3 text-gray-400 w-[130px]">
+                            <span className="text-[11px] font-medium text-gray-300 truncate block">
                               {item.category}
                             </span>
                             {item.domain && (
-                              <span className="block text-[10px] text-gray-500 font-mono">
+                              <span className="block text-[10px] text-gray-500 font-mono truncate">
                                 {item.domain}
                               </span>
                             )}
                           </td>
 
-                          <td className="py-2.5 px-3 whitespace-nowrap">
+                          <td className="py-2.5 px-3 whitespace-nowrap w-[170px]">
                             {item.type === 'email' ? (
                               item.mxStatus === 'valid' ? (
-                                <div className="flex flex-col items-start gap-0.5">
+                                <div className="flex flex-col items-start justify-center min-h-[34px] gap-0.5">
                                   <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-950/80 text-emerald-300 border border-emerald-500/50">
                                     <CheckCircle2 className="w-2.5 h-2.5 text-emerald-400 shrink-0" /> Active MX
                                   </span>
                                   {item.mxProvider && (
                                     <span
-                                      className="text-[9px] text-gray-400 font-mono pl-0.5 max-w-[130px] truncate block"
+                                      className="text-[9px] text-gray-400 font-mono pl-0.5 max-w-[140px] truncate block"
                                       title={item.mxDiagnostic || item.mxProvider}
                                     >
                                       {item.mxProvider}
@@ -1223,41 +1247,47 @@ export const FileTextContactExtractor: React.FC<FileTextContactExtractorProps> =
                                   )}
                                 </div>
                               ) : item.mxStatus === 'invalid' ? (
-                                <div className="flex flex-col items-start gap-0.5">
+                                <div className="flex flex-col items-start justify-center min-h-[34px] gap-0.5">
                                   <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-red-950/80 text-red-300 border border-red-500/50">
                                     <XCircle className="w-2.5 h-2.5 text-red-400 shrink-0" /> Dead / No MX
                                   </span>
                                   <span
-                                    className="text-[9px] text-red-400/80 font-mono pl-0.5 max-w-[130px] truncate block"
+                                    className="text-[9px] text-red-400/80 font-mono pl-0.5 max-w-[140px] truncate block"
                                     title={item.mxDiagnostic || 'No Mail Exchanger'}
                                   >
                                     {item.mxProvider || 'No mail server'}
                                   </span>
                                 </div>
                               ) : item.mxStatus === 'checking' ? (
-                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-blue-950/70 text-blue-300 border border-blue-500/50 animate-pulse">
-                                  <RefreshCw className="w-2.5 h-2.5 text-blue-400 animate-spin" /> Checking DNS...
-                                </span>
+                                <div className="flex items-center min-h-[34px]">
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-blue-950/70 text-blue-300 border border-blue-500/50">
+                                    <RefreshCw className="w-2.5 h-2.5 text-blue-400 animate-spin" /> Checking DNS...
+                                  </span>
+                                </div>
                               ) : (
-                                <button
-                                  type="button"
-                                  onClick={() => checkSingleEmailMX(item)}
-                                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-medium bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white border border-gray-700 transition"
-                                  title="Perform quick DNS MX check on this domain"
-                                >
-                                  <ShieldCheck className="w-2.5 h-2.5 text-gray-400" /> Check MX
-                                </button>
+                                <div className="flex items-center min-h-[34px]">
+                                  <button
+                                    type="button"
+                                    onClick={() => checkSingleEmailMX(item)}
+                                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-medium bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white border border-gray-700 transition"
+                                    title="Perform quick DNS MX check on this domain"
+                                  >
+                                    <ShieldCheck className="w-2.5 h-2.5 text-gray-400" /> Check MX
+                                  </button>
+                                </div>
                               )
                             ) : (
-                              <span className="text-gray-600 font-mono text-[11px]">-</span>
+                              <div className="flex items-center min-h-[34px]">
+                                <span className="text-gray-600 font-mono text-[11px]">-</span>
+                              </div>
                             )}
                           </td>
 
-                          <td className="py-2.5 px-3 text-gray-400 truncate max-w-[120px]" title={item.source}>
-                            <span className="text-[11px] font-mono">{item.source}</span>
+                          <td className="py-2.5 px-3 text-gray-400 w-[110px]" title={item.source}>
+                            <span className="text-[11px] font-mono truncate block max-w-[100px]">{item.source}</span>
                           </td>
 
-                          <td className="py-2.5 px-3 text-right whitespace-nowrap space-x-1">
+                          <td className="py-2.5 px-3 text-right whitespace-nowrap space-x-1 w-[85px]">
                             {item.type === 'email' && (
                               <button
                                 type="button"
