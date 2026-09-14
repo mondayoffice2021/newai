@@ -1,6 +1,16 @@
 import type { ExtractedEmail, CompanyIntel } from '../types';
 import { buildDorkQuery, getCountryCcTLD } from './dorkHelper';
 import { classifyCountryOffline, classifyIndustryOffline } from './offlineClassifier';
+import { getCountryFlag, cleanDomainName, type DomainCountryResolution } from './countryDetector';
+
+export interface CountryResolutionItem {
+  domain: string;
+  country: string;
+  confidence?: number;
+  method?: string;
+  evidence?: string;
+  flag?: string;
+}
 
 // Custom API key placeholder for backwards compatibility
 let customApiKey: string | null = null;
@@ -165,21 +175,108 @@ export const analyzeCompanyFromEmail = async (
 };
 
 /**
- * Country Identifier (Instantaneous, Zero Quota Limits)
+ * Deep Country Identifier
+ * Resolves countries for all domains, specifically diving deep into ambiguous .com, .net, .org, .io domains
+ * by querying live website contact/impressum pages, phone dialing codes, Schema.org address markup,
+ * multi-engine search grounding (DuckDuckGo & Google), and DNS MX mail exchangers.
  */
 export const identifyCountriesForDomains = async (
-    domains: string[]
-): Promise<{ domain: string; country: string }[]> => {
-    return domains.map(domain => {
-        const country = classifyCountryOffline(domain) || 'Unknown';
-        return { domain, country };
+    domains: string[],
+    options?: { deepResolve?: boolean; apiKey?: string }
+): Promise<CountryResolutionItem[]> => {
+    if (!domains || domains.length === 0) return [];
+
+    const deep = options?.deepResolve !== false; // Default to deep resolve
+    const effectiveKey = options?.apiKey || customApiKey || (typeof window !== 'undefined' ? localStorage.getItem('gemini_api_key') || '' : '');
+
+    // Step 1: Separate immediate offline hits (ccTLDs like .de, .co.uk, known corporate giants)
+    const results: CountryResolutionItem[] = [];
+    const unresolved: string[] = [];
+
+    domains.forEach(domain => {
+        const clean = cleanDomainName(domain);
+        const offlineMatch = classifyCountryOffline(clean);
+        // If it's a direct country TLD (.de, .fr, .uk, etc.) or in our corporate registry, resolve instantly
+        if (offlineMatch) {
+            results.push({
+                domain: clean,
+                country: offlineMatch,
+                confidence: 98,
+                method: 'cctld',
+                evidence: `Resolved via country top-level domain or enterprise registry`,
+                flag: getCountryFlag(offlineMatch)
+            });
+        } else {
+            unresolved.push(clean);
+        }
     });
+
+    // If all domains resolved via ccTLD or deep resolve is disabled, return now
+    if (unresolved.length === 0 || !deep) {
+        unresolved.forEach(dom => {
+            results.push({
+                domain: dom,
+                country: 'Unknown',
+                confidence: 0,
+                method: 'unknown',
+                evidence: 'Unresolved domain',
+                flag: '🌐'
+            });
+        });
+        return results;
+    }
+
+    // Step 2: Go deep on unresolved (.com, .net, .org, .io, .co, etc.) via backend crawler & search engines
+    try {
+        const res = await fetch('/api/deep-country-resolve', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                ...(effectiveKey ? { 'x-gemini-api-key': effectiveKey } : {})
+            },
+            body: JSON.stringify({ domains: unresolved, apiKey: effectiveKey })
+        });
+
+        if (res.ok) {
+            const data = await res.json();
+            if (Array.isArray(data.results)) {
+                data.results.forEach((item: any) => {
+                    results.push({
+                        domain: item.domain,
+                        country: item.country || 'Unknown',
+                        confidence: item.confidence || 0,
+                        method: item.method || 'search_engine',
+                        evidence: item.evidence || '',
+                        flag: item.flag || getCountryFlag(item.country || 'Unknown')
+                    });
+                });
+                return results;
+            }
+        }
+    } catch (err) {
+        console.warn("[Country Resolution Notice] Backend deep resolver notice, falling back to local heuristic:", err);
+    }
+
+    // Fallback: Return unresolved items as Unknown with basic flag
+    unresolved.forEach(dom => {
+        results.push({
+            domain: dom,
+            country: 'Unknown',
+            confidence: 0,
+            method: 'unknown',
+            evidence: 'Generic domain extension with no public contact/search match',
+            flag: '🌐'
+        });
+    });
+
+    return results;
 };
 
 export const identifyUnknownDomainsDeeply = async (
-    domains: string[]
-): Promise<{ domain: string; country: string }[]> => {
-    return identifyCountriesForDomains(domains);
+    domains: string[],
+    apiKey?: string
+): Promise<CountryResolutionItem[]> => {
+    return identifyCountriesForDomains(domains, { deepResolve: true, apiKey });
 };
 
 /**

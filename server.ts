@@ -4,6 +4,7 @@ import net from "net";
 import dns from "dns";
 import { promisify } from "util";
 import { enrichDomainsIntelligence } from "./services/domainEnricher";
+import { resolveBatchDomainsDeeply } from "./services/deepCountryResolver";
 
 const resolveMx = promisify(dns.resolveMx);
 
@@ -698,6 +699,26 @@ async function startServer() {
     } catch (err: any) {
       console.error("[Domain Intelligence API] Error:", err?.message || err);
       res.status(500).json({ error: "Failed to enrich domain intelligence", details: err?.message });
+    }
+  });
+
+  // Deep Country Resolution Endpoint (Website Contact & Multi-Engine Search)
+  app.post("/api/deep-country-resolve", async (req, res) => {
+    const { domains, apiKey } = req.body;
+    if (!Array.isArray(domains) || domains.length === 0) {
+      return res.status(400).json({ error: "Domains array required" });
+    }
+
+    const headerKey = req.headers['x-gemini-api-key'] as string;
+    const effectiveKey = (typeof apiKey === 'string' && apiKey.trim()) || (headerKey && headerKey.trim()) || process.env.GEMINI_API_KEY;
+
+    try {
+      console.log(`[Deep Country API] Resolving ${domains.length} domains (Live contact scraping + Search engines)...`);
+      const results = await resolveBatchDomainsDeeply(domains, effectiveKey, 6);
+      res.json({ results });
+    } catch (err: any) {
+      console.error("[Deep Country API] Error:", err?.message || err);
+      res.status(500).json({ error: "Failed to resolve domain countries", details: err?.message });
     }
   });
 

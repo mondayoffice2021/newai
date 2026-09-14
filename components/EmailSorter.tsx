@@ -1,8 +1,9 @@
 
 import React, { useState, useRef } from 'react';
-import { identifyCountriesForDomains, identifyUnknownDomainsDeeply } from '../services/geminiService';
+import { identifyCountriesForDomains, identifyUnknownDomainsDeeply, type CountryResolutionItem } from '../services/geminiService';
 import { classifyCountryOffline } from '../services/offlineClassifier';
 import { extractEmailsFromFile } from '../services/fileService';
+import { getCountryFlag } from '../services/countryDetector';
 import { 
   filterBusinessEmailsBulk, 
   DEFAULT_BUSINESS_FILTER_OPTIONS, 
@@ -19,6 +20,8 @@ import ShieldCheckIcon from './icons/ShieldCheckIcon';
 import FunnelIcon from './icons/FunnelIcon';
 import XCircleIcon from './icons/XCircleIcon';
 import CheckIcon from './icons/CheckIcon';
+import GlobeAltIcon from './icons/GlobeAltIcon';
+import MagnifyingGlassIcon from './icons/MagnifyingGlassIcon';
 import JSZip from 'jszip';
 import ToggleSwitch from './ToggleSwitch';
 import { useActiveWakeLock } from '../hooks/useWakeLock';
@@ -44,6 +47,13 @@ const EmailSorter: React.FC<EmailSorterProps> = ({ showToast }) => {
   const [statusText, setStatusText] = useState<string>('Initializing...');
   const [largeFileMode, setLargeFileMode] = useState(false);
   const [useOfflineMode, setUseOfflineMode] = useState(false);
+  
+  // Deep country resolution states (.com, contact page crawling & search engine grounding)
+  const [enableDeepResolution, setEnableDeepResolution] = useState<boolean>(true);
+  const [domainAuditMap, setDomainAuditMap] = useState<Map<string, CountryResolutionItem>>(new Map());
+  const [showAuditModal, setShowAuditModal] = useState<boolean>(false);
+  const [auditSearchQuery, setAuditSearchQuery] = useState<string>('');
+  const [selectedCountryAudit, setSelectedCountryAudit] = useState<string>('all');
   
   // Business relevance filter states
   const [enableBusinessFilter, setEnableBusinessFilter] = useState<boolean>(true);
@@ -133,6 +143,22 @@ const EmailSorter: React.FC<EmailSorterProps> = ({ showToast }) => {
             folder.file(filename, content);
         });
 
+        // Add Country Detection Audit Report if available
+        if (domainAuditMap.size > 0) {
+            const auditReport = [
+              `# COUNTRY DETECTION & RESOLUTION AUDIT REPORT`,
+              `# Exported: ${new Date().toISOString()}`,
+              `# Total Domains Classified: ${domainAuditMap.size}`,
+              `# Deep Search & Website Contact Crawling: ${enableDeepResolution ? 'Enabled' : 'Disabled'}`,
+              '',
+              `Domain\tCountry\tConfidence\tMethod\tEvidence`,
+              ...Array.from<CountryResolutionItem>(domainAuditMap.values()).map((item: CountryResolutionItem) => 
+                `${item.domain}\t${item.country}\t${item.confidence || 0}%\t${item.method || 'unknown'}\t${item.evidence || ''}`
+              )
+            ].join('\n');
+            folder.file(`_COUNTRY_DETECTION_REPORT_${dateStr}.txt`, auditReport);
+        }
+
         if (filterSummary && filterSummary.excludedEmails.length > 0) {
             const excludedContent = [
               `# EXCLUDED NON-BUSINESS EMAILS (${filterSummary.excludedEmails.length} total)`,
@@ -146,12 +172,34 @@ const EmailSorter: React.FC<EmailSorterProps> = ({ showToast }) => {
 
         const content = await zip.generateAsync({ type: "blob" });
         downloadBlob(content, `${folderName}.zip`);
-        showToast("Downloaded all files as ZIP (clean business emails).");
+        showToast("Downloaded all files as ZIP (clean business emails + audit report).");
 
     } catch (e) {
         console.error("Zip generation failed", e);
         showToast("Failed to generate ZIP file.");
     }
+  };
+
+  const handleExportAuditTxt = () => {
+    if (domainAuditMap.size === 0) {
+      showToast("No domain audit records available yet.");
+      return;
+    }
+    const dateStr = new Date().toISOString().split('T')[0];
+    const auditContent = [
+      `# COUNTRY DETECTION & RESOLUTION AUDIT REPORT`,
+      `# Date: ${dateStr}`,
+      `# Total Domains Classified: ${domainAuditMap.size}`,
+      `# Deep Search & Contact Crawling Mode: ${enableDeepResolution ? 'Enabled' : 'Disabled'}`,
+      '',
+      `Domain\tCountry\tConfidence\tMethod\tEvidence`,
+      ...Array.from<CountryResolutionItem>(domainAuditMap.values()).map((item: CountryResolutionItem) => 
+        `${item.domain}\t${item.country}\t${item.confidence || 0}%\t${item.method || 'unknown'}\t${item.evidence || ''}`
+      )
+    ].join('\n');
+    const blob = new Blob([auditContent], { type: 'text/plain;charset=utf-8;' });
+    downloadBlob(blob, `country_detection_audit_${dateStr}.txt`);
+    showToast("Downloaded country detection audit report.");
   };
 
   const handleExportExcludedTxt = () => {
@@ -278,6 +326,7 @@ const EmailSorter: React.FC<EmailSorterProps> = ({ showToast }) => {
       const totalDomains = allDomains.length;
 
       let currentResultsMap = new Map<string, string[]>(); 
+      const currentAuditMap = new Map<string, CountryResolutionItem>();
 
       // --- STEP 1: Pre-classify country offline (Extremely Fast) ---
       setStatusText('Pre-classifying domains offline...');
@@ -291,10 +340,20 @@ const EmailSorter: React.FC<EmailSorterProps> = ({ showToast }) => {
                   currentResultsMap.set(offlineCountry, []);
               }
               currentResultsMap.get(offlineCountry)?.push(...emailsForDomain);
+              currentAuditMap.set(domain, {
+                  domain,
+                  country: offlineCountry,
+                  confidence: 98,
+                  method: 'cctld',
+                  evidence: `Matched ccTLD or global enterprise corporate registry (${offlineCountry})`,
+                  flag: getCountryFlag(offlineCountry)
+              });
           } else {
               unresolvedDomains.push(domain);
           }
       });
+
+      setDomainAuditMap(new Map(currentAuditMap));
 
       // Update UI with initial offline-sorted results immediately
       const initialResults: SortedGroup[] = Array.from(currentResultsMap.entries())
@@ -302,8 +361,8 @@ const EmailSorter: React.FC<EmailSorterProps> = ({ showToast }) => {
           .sort((a, b) => b.emails.length - a.emails.length);
       setSortedResults(initialResults);
 
-      if (unresolvedDomains.length === 0 || useOfflineMode) {
-          // If there are no unresolved domains, or offline mode is forced, resolve all remaining as Unknown instantly!
+      if (unresolvedDomains.length === 0 || useOfflineMode || !enableDeepResolution) {
+          // If there are no unresolved domains, or deep mode is disabled, resolve remaining as Unknown
           if (unresolvedDomains.length > 0) {
               unresolvedDomains.forEach(domain => {
                   const emailsForDomain = domainMap.get(domain) || [];
@@ -311,8 +370,17 @@ const EmailSorter: React.FC<EmailSorterProps> = ({ showToast }) => {
                       currentResultsMap.set('Unknown', []);
                   }
                   currentResultsMap.get('Unknown')?.push(...emailsForDomain);
+                  currentAuditMap.set(domain, {
+                      domain,
+                      country: 'Unknown',
+                      confidence: 0,
+                      method: 'unknown',
+                      evidence: 'Generic domain extension (.com/.net/.org) without deep crawling enabled',
+                      flag: '🌐'
+                  });
               });
 
+              setDomainAuditMap(new Map(currentAuditMap));
               const finalOfflineResults: SortedGroup[] = Array.from(currentResultsMap.entries())
                   .map(([country, emails]) => ({ country, emails }))
                   .sort((a, b) => b.emails.length - a.emails.length);
@@ -324,12 +392,11 @@ const EmailSorter: React.FC<EmailSorterProps> = ({ showToast }) => {
           return;
       }
 
-      // --- STEP 2: Secondary Domain Resolution (Only for remaining unknown domains) ---
-      const BATCH_SIZE = 50;
+      // --- STEP 2: Deep Domain Resolution (Crawls website contact pages & queries multi-engine search) ---
+      const BATCH_SIZE = 20;
       const totalUnresolved = unresolvedDomains.length;
 
       for (let i = 0; i < totalUnresolved; i += BATCH_SIZE) {
-        
         if (controlRef.current.shouldStop) break;
 
         while (controlRef.current.isPaused) {
@@ -340,19 +407,25 @@ const EmailSorter: React.FC<EmailSorterProps> = ({ showToast }) => {
 
         const batch = unresolvedDomains.slice(i, i + BATCH_SIZE);
         setProgress({ current: Math.min(i + BATCH_SIZE, totalUnresolved), total: totalUnresolved });
-        setStatusText(`Analyzing batch ${Math.ceil((i + 1) / BATCH_SIZE)} of unresolved domains...`);
+        
+        const sampleText = batch.slice(0, 3).join(', ') + (batch.length > 3 ? ` +${batch.length - 3} more` : '');
+        setStatusText(`Deep contact crawling & search grounding: ${sampleText}...`);
         
         const batchResults = new Map<string, string>();
         
-        // Resolve remaining domains
-        const identified = await processBatchWithRetry(() => identifyCountriesForDomains(batch));
+        // Resolve remaining domains using deep website crawling and multi-engine search
+        const identified = await processBatchWithRetry(() => 
+          identifyCountriesForDomains(batch, { deepResolve: true })
+        );
         
         if (identified) {
             identified.forEach(item => {
+                currentAuditMap.set(item.domain.toLowerCase(), item);
                 if (item.country && item.country !== 'Unknown') {
                     batchResults.set(item.domain.toLowerCase(), item.country);
                 }
             });
+            setDomainAuditMap(new Map(currentAuditMap));
         }
         
         // Fill in 'Unknown' or any identified country
@@ -363,7 +436,20 @@ const EmailSorter: React.FC<EmailSorterProps> = ({ showToast }) => {
                 currentResultsMap.set(country, []);
             }
             currentResultsMap.get(country)?.push(...emailsForDomain);
+
+            if (!currentAuditMap.has(domain)) {
+                currentAuditMap.set(domain, {
+                    domain,
+                    country,
+                    confidence: country === 'Unknown' ? 0 : 80,
+                    method: country === 'Unknown' ? 'unknown' : 'search_engine',
+                    evidence: country === 'Unknown' ? 'No public address or headquarters found' : 'Resolved',
+                    flag: getCountryFlag(country)
+                });
+            }
         });
+
+        setDomainAuditMap(new Map(currentAuditMap));
 
         const partialResults: SortedGroup[] = Array.from(currentResultsMap.entries())
             .map(([country, emails]) => ({ country, emails }))
@@ -399,6 +485,21 @@ const EmailSorter: React.FC<EmailSorterProps> = ({ showToast }) => {
         ? filterSummary.excludedEmails 
         : filterSummary.excludedEmails.filter(e => e.category === excludedCategoryFilter))
     : [];
+
+  const auditItems: CountryResolutionItem[] = Array.from(domainAuditMap.values());
+  const filteredAuditList: CountryResolutionItem[] = auditItems.filter((item: CountryResolutionItem) => {
+    if (selectedCountryAudit !== 'all' && item.country !== selectedCountryAudit) {
+      return false;
+    }
+    if (!auditSearchQuery.trim()) return true;
+    const q = auditSearchQuery.toLowerCase();
+    return (
+      item.domain.toLowerCase().includes(q) ||
+      item.country.toLowerCase().includes(q) ||
+      Boolean(item.evidence && item.evidence.toLowerCase().includes(q)) ||
+      Boolean(item.method && item.method.toLowerCase().includes(q))
+    );
+  });
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 h-full">
@@ -515,17 +616,28 @@ const EmailSorter: React.FC<EmailSorterProps> = ({ showToast }) => {
             )}
           </div>
           
-          <div className="mb-4">
-               <ToggleSwitch 
-                  label="Instant TLD + Pattern Mode" 
-                  enabled={useOfflineMode} 
-                  onChange={setUseOfflineMode} 
-                  disabled={isProcessing}
-               />
-               <p className="text-gray-400 text-xs mt-1">
-                  {useOfflineMode 
-                     ? "Uses 200+ ccTLD extensions (.fr, .de, .co.uk) & domain heuristics. Instant speed." 
-                     : "Comprehensive classification with corporate headquarters mapping and domain signals."}
+          <div className="mb-4 p-3.5 bg-gradient-to-br from-indigo-950/50 to-blue-950/30 border border-indigo-700/60 rounded-xl shadow-inner">
+               <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                     <div className="w-7 h-7 rounded-lg bg-indigo-600/30 border border-indigo-500/40 flex items-center justify-center">
+                        <GlobeAltIcon className="w-4 h-4 text-indigo-300" />
+                     </div>
+                     <div>
+                        <span className="text-sm font-semibold text-white block">Deep Country Classifier</span>
+                        <span className="text-[11px] text-indigo-300">For .com & generic extensions</span>
+                     </div>
+                  </div>
+                  <ToggleSwitch 
+                     label="" 
+                     enabled={enableDeepResolution} 
+                     onChange={setEnableDeepResolution} 
+                     disabled={isProcessing}
+                  />
+               </div>
+               <p className="text-gray-300 text-xs mt-2.5 leading-relaxed">
+                  {enableDeepResolution 
+                     ? "Active: Crawls live website contact & impressum pages, parses Schema.org addresses & phone codes, and grounds on search engine headquarters snippets." 
+                     : "Fast mode: Restricted to ccTLD extensions (.de, .fr, .uk) and built-in enterprise database only."}
                </p>
           </div>
           
@@ -617,6 +729,30 @@ const EmailSorter: React.FC<EmailSorterProps> = ({ showToast }) => {
                </div>
                
                <div className="flex items-center gap-2">
+                 {domainAuditMap.size > 0 && (
+                   <>
+                     <button
+                       onClick={() => {
+                         setSelectedCountryAudit('all');
+                         setShowAuditModal(true);
+                       }}
+                       className="flex items-center px-3 py-2 text-xs font-medium rounded-md bg-indigo-900/60 hover:bg-indigo-800 text-indigo-200 border border-indigo-700/60 transition-all duration-200 shadow-sm"
+                       title="View exact evidence, search engine groundings, and contact page scrapes for each domain"
+                     >
+                       <MagnifyingGlassIcon className="w-4 h-4 mr-1.5 text-indigo-400" />
+                       Audit ({domainAuditMap.size})
+                     </button>
+                     <button
+                       onClick={handleExportAuditTxt}
+                       className="flex items-center px-2.5 py-2 text-xs font-medium rounded-md bg-gray-800 hover:bg-gray-700 text-gray-300 border border-gray-600 transition-all"
+                       title="Download country detection audit report as .txt"
+                     >
+                       <DocumentArrowUpIcon className="w-3.5 h-3.5 mr-1" />
+                       Audit (.txt)
+                     </button>
+                   </>
+                 )}
+
                  {filterSummary && filterSummary.excludedEmails.length > 0 && (
                    <>
                      <button
@@ -714,20 +850,36 @@ const EmailSorter: React.FC<EmailSorterProps> = ({ showToast }) => {
                         <div key={group.country} className="bg-gray-800/50 border border-gray-700 rounded-lg p-4 hover:border-gray-600 transition-colors animate-fade-in">
                            <div className="flex justify-between items-start mb-3">
                               <div className="flex items-center">
-                                 <span className="text-2xl mr-2" role="img" aria-label="flag">
-                                    {group.country === 'Unknown' ? '❓' : '🏳️'}
+                                 <span className="text-2xl mr-2.5 select-none" role="img" aria-label="flag">
+                                    {getCountryFlag(group.country)}
                                  </span>
                                  <div>
-                                    <h3 className="font-bold text-white text-sm">{group.country}</h3>
+                                    <h3 className="font-bold text-white text-sm flex items-center gap-1.5">
+                                      {group.country}
+                                    </h3>
                                     <span className="text-xs text-gray-400">{group.emails.length} emails</span>
                                  </div>
                               </div>
-                              <button 
-                                 onClick={() => handleExportGroup(group)}
-                                 className="flex items-center gap-1 px-2 py-1 text-xs font-medium bg-gray-700 hover:bg-blue-600 text-gray-300 hover:text-white rounded transition-all"
-                              >
-                                 <DocumentArrowUpIcon className="w-3 h-3" /> Export
-                              </button>
+                              <div className="flex items-center gap-1.5">
+                                 {domainAuditMap.size > 0 && (
+                                   <button
+                                      onClick={() => {
+                                        setSelectedCountryAudit(group.country);
+                                        setShowAuditModal(true);
+                                      }}
+                                      className="flex items-center gap-1 px-2 py-1 text-xs font-medium bg-gray-800 hover:bg-indigo-900/70 text-indigo-300 border border-gray-700 rounded transition-all"
+                                      title={`Inspect evidence for ${group.country}`}
+                                   >
+                                      <MagnifyingGlassIcon className="w-3 h-3 text-indigo-400" /> Evidence
+                                   </button>
+                                 )}
+                                 <button 
+                                    onClick={() => handleExportGroup(group)}
+                                    className="flex items-center gap-1 px-2 py-1 text-xs font-medium bg-gray-700 hover:bg-blue-600 text-gray-300 hover:text-white rounded transition-all"
+                                 >
+                                    <DocumentArrowUpIcon className="w-3 h-3" /> Export
+                                 </button>
+                              </div>
                            </div>
                            <div className="bg-gray-900/50 rounded p-2 max-h-48 overflow-y-auto custom-scrollbar">
                               {group.emails.map((email, idx) => (
@@ -886,6 +1038,147 @@ const EmailSorter: React.FC<EmailSorterProps> = ({ showToast }) => {
                 </button>
                 <button
                   onClick={() => setShowExcludedModal(false)}
+                  className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded text-xs font-medium"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* COUNTRY DETECTION AUDIT & EVIDENCE MODAL */}
+      {showAuditModal && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-gray-900 border border-indigo-700/60 rounded-xl shadow-2xl max-w-4xl w-full max-h-[88vh] flex flex-col overflow-hidden animate-fade-in">
+            <div className="p-4 border-b border-gray-800 flex justify-between items-center bg-gray-850">
+              <div>
+                <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                  <GlobeAltIcon className="w-5 h-5 text-indigo-400" />
+                  Country Detection & Evidence Audit
+                  <span className="text-xs px-2.5 py-0.5 rounded-full bg-indigo-950 text-indigo-300 border border-indigo-700 font-semibold">
+                    {domainAuditMap.size} domains classified
+                  </span>
+                </h3>
+                <p className="text-xs text-gray-400 mt-0.5">
+                  Full intelligence trace: website /contact & impressum scrapes, phone dialing codes, Schema.org addresses, and search engine headquarters groundings.
+                </p>
+              </div>
+              <button 
+                onClick={() => setShowAuditModal(false)}
+                className="text-gray-400 hover:text-white text-sm px-2.5 py-1 rounded bg-gray-800 hover:bg-gray-700 transition-colors"
+              >
+                ✕ Close
+              </button>
+            </div>
+
+            {/* Filter and Search Bar */}
+            <div className="p-3 bg-gray-950/80 border-b border-gray-800 flex flex-wrap gap-3 items-center justify-between">
+              <div className="flex items-center gap-2 flex-1 min-w-[240px]">
+                <div className="relative w-full">
+                  <MagnifyingGlassIcon className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    placeholder="Search by domain, country, or evidence text..."
+                    value={auditSearchQuery}
+                    onChange={(e) => setAuditSearchQuery(e.target.value)}
+                    className="w-full pl-9 pr-3 py-1.5 bg-gray-900 border border-gray-700 rounded-lg text-xs text-gray-200 placeholder-gray-500 focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+              </div>
+
+              {/* Country Filter Selector */}
+              <div className="flex items-center gap-2">
+                <label className="text-xs text-gray-400">Filter Location:</label>
+                <select
+                  value={selectedCountryAudit}
+                  onChange={(e) => setSelectedCountryAudit(e.target.value)}
+                  className="bg-gray-900 border border-gray-700 rounded px-2.5 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-indigo-500"
+                >
+                  <option value="all">All Countries ({domainAuditMap.size})</option>
+                  {sortedResults.map(g => (
+                    <option key={g.country} value={g.country}>
+                      {getCountryFlag(g.country)} {g.country} ({g.emails.length})
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            {/* Audit List */}
+            <div className="flex-grow overflow-y-auto p-4 custom-scrollbar space-y-2.5 bg-gray-950/30">
+              {filteredAuditList.length === 0 ? (
+                <div className="text-center py-12 text-gray-500 text-xs">
+                  No domain records match your filter criteria.
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {filteredAuditList.map((item: CountryResolutionItem) => (
+                    <div 
+                      key={item.domain}
+                      className="bg-gray-850/80 border border-gray-800 hover:border-gray-700 rounded-lg p-3 transition-colors flex flex-col md:flex-row md:items-center justify-between gap-3"
+                    >
+                      <div className="flex items-center gap-3 min-w-[210px]">
+                        <span className="text-2xl select-none" role="img" aria-label="flag">
+                          {item.flag || getCountryFlag(item.country)}
+                        </span>
+                        <div>
+                          <span className="font-mono text-xs font-bold text-white block select-all">
+                            {item.domain}
+                          </span>
+                          <span className="text-xs text-indigo-300 font-medium">
+                            {item.country}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="flex-1 text-xs bg-gray-900/70 rounded p-2.5 border border-gray-800">
+                        <div className="flex items-center justify-between gap-2 mb-1.5">
+                          <span className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wider ${
+                            item.method === 'contact_page' ? 'bg-blue-950 text-blue-300 border border-blue-800/60' :
+                            item.method === 'search_engine' ? 'bg-emerald-950 text-emerald-300 border border-emerald-800/60' :
+                            item.method === 'cctld' ? 'bg-purple-950 text-purple-300 border border-purple-800/60' :
+                            item.method === 'ai_grounded' ? 'bg-amber-950 text-amber-300 border border-amber-800/60' :
+                            'bg-gray-800 text-gray-400 border border-gray-700'
+                          }`}>
+                            {item.method === 'contact_page' ? '🏢 Website Contact / Impressum' :
+                             item.method === 'search_engine' ? '🔍 Search Engine Grounding' :
+                             item.method === 'cctld' ? '🌐 ccTLD Extension' :
+                             item.method === 'ai_grounded' ? '🤖 AI Headquarters Match' :
+                             'Generic Domain'}
+                          </span>
+                          {item.confidence ? (
+                            <span className="text-[11px] text-gray-400">
+                              Confidence: <strong className="text-white">{item.confidence}%</strong>
+                            </span>
+                          ) : null}
+                        </div>
+                        <p className="text-[11px] text-gray-300 leading-relaxed font-mono">
+                          {item.evidence || 'No detailed evidence record available.'}
+                        </p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            <div className="p-4 border-t border-gray-800 bg-gray-950 flex justify-between items-center">
+              <span className="text-xs text-gray-400">
+                Showing {filteredAuditList.length} of {domainAuditMap.size} domains
+              </span>
+              <div className="flex gap-2">
+                <button
+                  onClick={handleExportAuditTxt}
+                  className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-xs font-medium flex items-center gap-1.5 shadow-md"
+                >
+                  <DocumentArrowUpIcon className="w-3.5 h-3.5" />
+                  Download Audit Report (.txt)
+                </button>
+                <button
+                  onClick={() => setShowAuditModal(false)}
                   className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded text-xs font-medium"
                 >
                   Close

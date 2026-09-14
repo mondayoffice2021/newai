@@ -6,6 +6,7 @@ import {
   GLOBAL_CORPORATE_DOMAINS,
   GLOBAL_CORPORATE_INDUSTRIES 
 } from "./offlineClassifier";
+import { analyzeWebsiteHtmlForCountry, analyzeSearchSnippetForCountry } from "./countryDetector";
 
 export interface CompanyIntelligenceResult {
   domain: string;
@@ -710,8 +711,17 @@ export function analyzeMetaLocally(meta: RawDomainMeta): CompanyIntelligenceResu
     overview = overview.slice(0, 297) + '...';
   }
 
-  // 8. Headquarters
-  const hq = classifyCountryOffline(meta.domain) || 'Global';
+  // 8. Headquarters (Deep resolution via ccTLD, corporate registries, website contact, and search snippet)
+  let hq = classifyCountryOffline(meta.domain);
+  if (!hq && meta.bodySnippet) {
+    const webCountry = analyzeWebsiteHtmlForCountry(meta.bodySnippet, meta.domain);
+    if (webCountry) hq = webCountry.country;
+  }
+  if (!hq && meta.searchSnippet) {
+    const searchCountry = analyzeSearchSnippetForCountry(meta.searchSnippet, meta.searchTitle);
+    if (searchCountry) hq = searchCountry.country;
+  }
+  if (!hq) hq = 'Global';
 
   // 9. Confidence Score
   let confidence = 75;
