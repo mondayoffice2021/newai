@@ -131,7 +131,8 @@ export const GLOBAL_CORPORATE_DOMAINS: Record<string, string> = {
     // Canada
     'shopify.com': 'Canada', 'rbc.com': 'Canada', 'td.com': 'Canada',
     'bmo.com': 'Canada', 'scotiabank.com': 'Canada', 'lululemon.com': 'Canada',
-    'magna.com': 'Canada', 'bombardier.com': 'Canada',
+    'magna.com': 'Canada', 'bombardier.com': 'Canada', 'hootsuite.com': 'Canada',
+    'lightspeedhq.com': 'Canada', 'opentext.com': 'Canada', 'blackberry.com': 'Canada',
     // India
     'tata.com': 'India', 'infosys.com': 'India', 'wipro.com': 'India',
     'reliance.com': 'India', 'tcs.com': 'India', 'hcltech.com': 'India',
@@ -139,6 +140,42 @@ export const GLOBAL_CORPORATE_DOMAINS: Record<string, string> = {
     // Australia
     'atlassian.com': 'Australia', 'canva.com': 'Australia', 'bhp.com': 'Australia',
     'rio-tinto.com': 'Australia', 'riotinto.com': 'Australia', 'csl.com': 'Australia',
+    'envato.com': 'Australia', 'afterpay.com': 'Australia', 'safetyculture.com': 'Australia',
+    // Germany Tech & Scaleups
+    'zalando.com': 'Germany', 'deliveryhero.com': 'Germany', 'hellofresh.com': 'Germany',
+    'n26.com': 'Germany', 'flixbus.com': 'Germany', 'personio.com': 'Germany',
+    'celonis.com': 'Germany', 'trivago.com': 'Germany',
+    // France Tech & Retail
+    'carrefour.com': 'France', 'ovhcloud.com': 'France', 'ovh.com': 'France',
+    'blablacar.com': 'France', 'deezer.com': 'France', 'mistral.ai': 'France',
+    'leboncoin.fr': 'France', 'mirakl.com': 'France',
+    // United Kingdom Tech & Scaleups
+    'deliveroo.com': 'United Kingdom', 'revolut.com': 'United Kingdom', 'wise.com': 'United Kingdom',
+    'monzo.com': 'United Kingdom', 'checkout.com': 'United Kingdom', 'ocado.com': 'United Kingdom',
+    'asos.com': 'United Kingdom', 'boohoo.com': 'United Kingdom', 'gymshark.com': 'United Kingdom',
+    // Netherlands Tech & Services
+    'justeattakeaway.com': 'Netherlands', 'takeaway.com': 'Netherlands', 'tomtom.com': 'Netherlands',
+    'elastic.co': 'Netherlands', 'mollie.com': 'Netherlands', 'messagebird.com': 'Netherlands',
+    'bird.com': 'Netherlands',
+    // Israel Tech
+    'wix.com': 'Israel', 'monday.com': 'Israel', 'fiverr.com': 'Israel',
+    'checkpoint.com': 'Israel', 'taboola.com': 'Israel', 'outbrain.com': 'Israel',
+    // Finland Tech
+    'supercell.com': 'Finland', 'rovio.com': 'Finland', 'wolt.com': 'Finland', 'nokia.com': 'Finland',
+    // Denmark Tech
+    'trustpilot.com': 'Denmark', 'zendesk.com': 'Denmark', 'unity.com': 'Denmark',
+    'maersk.com': 'Denmark', 'novonordisk.com': 'Denmark', 'pandora.net': 'Denmark', 'lego.com': 'Denmark',
+    // Switzerland Tech & Brands
+    'on-running.com': 'Switzerland', 'proton.me': 'Switzerland', 'protonmail.com': 'Switzerland',
+    // Estonia Tech
+    'bolt.eu': 'Estonia', 'pipedrive.com': 'Estonia', 'veriff.com': 'Estonia',
+    // United States SaaS & Tech
+    'webflow.com': 'United States', 'airtable.com': 'United States', 'figma.com': 'United States',
+    'notion.so': 'United States', 'slack.com': 'United States', 'hubspot.com': 'United States',
+    'zoom.us': 'United States', 'github.com': 'United States', 'gitlab.com': 'United States',
+    'cloudflare.com': 'United States', 'squareup.com': 'United States', 'block.xyz': 'United States',
+    'twilio.com': 'United States', 'dropbox.com': 'United States', 'box.com': 'United States',
+    'splunk.com': 'United States', 'datadoghq.com': 'United States',
     // Taiwan
     'tsmc.com': 'Taiwan', 'foxconn.com': 'Taiwan', 'asus.com': 'Taiwan',
     'acer.com': 'Taiwan', 'mediatek.com': 'Taiwan'

@@ -443,19 +443,32 @@ export function cleanDomainName(raw: string): string {
  * Inspect HTML content from website contact/about/home pages
  * Extracts country based on:
  * 1. Schema.org JSON-LD PostalAddress
- * 2. HTML lang and meta geotags (geo.region, geo.placename)
- * 3. OpenGraph locale (og:locale)
- * 4. International telephone dialing codes on contact page (+49, +44, +33, etc.)
- * 5. Impressum legal notice (German/Austrian/Swiss mandatory imprint)
- * 6. Physical address keywords and major cities
+ * 2. <a href="tel:..."> international dialing codes
+ * 3. Verified Impressum with official registry numbers (Handelsregister, HRB, Amtsgericht)
+ * 4. National postal code formats (UK, Canada, Australia, US, France, Germany, Netherlands)
+ * 5. Google Maps iframe embed coordinates/queries
+ * 6. Meta geotags (geo.region, geo.placename) and og:locale
  * 7. Distinct national legal entity forms (GmbH, SAS, B.V., S.L., Pty Ltd, etc.)
+ * 8. Physical address and headquarters keywords
  */
-export function analyzeWebsiteHtmlForCountry(html: string, domain: string): { country: string; method: DomainCountryResolution['method']; evidence: string; confidence: number } | null {
+export function analyzeWebsiteHtmlForCountry(html: string, domain: string, url: string = ''): { country: string; method: DomainCountryResolution['method']; evidence: string; confidence: number } | null {
   if (!html || html.length < 50) return null;
 
-  const lowerHtml = html.toLowerCase();
+  // Sanitize text for text-based checks to eliminate script coordinates, SVG numbers, and CSS
+  const sanitizedText = html
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<svg[\s\S]*?<\/svg>/gi, ' ')
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ');
 
-  // 1. Check Schema.org JSON-LD for explicit country
+  const lowerText = sanitizedText.toLowerCase();
+  const lowerHtml = html.toLowerCase();
+  const isDedicatedImprintOrContact = /\/(?:contact|kontakt|impressum|imprint|legal|about)/i.test(url);
+
+  // 1. Check Schema.org JSON-LD for explicit addressCountry
   try {
     const jsonLdRegex = /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
     let match;
@@ -466,20 +479,18 @@ export function analyzeWebsiteHtmlForCountry(html: string, domain: string): { co
         for (const node of nodes) {
           if (!node || typeof node !== 'object') continue;
           
-          // Address node check
           const address = node.address || (node['@type'] === 'PostalAddress' ? node : null);
           if (address && typeof address === 'object') {
             const countryVal = address.addressCountry;
             const countryStr = typeof countryVal === 'string' ? countryVal.trim() : (countryVal?.name || '');
             if (countryStr) {
-              // Match 2-letter ISO or full name
               for (const [name, info] of Object.entries(GLOBAL_COUNTRIES)) {
                 if (info.code.toLowerCase() === countryStr.toLowerCase() || name.toLowerCase() === countryStr.toLowerCase()) {
                   return {
                     country: name,
                     method: 'jsonld_schema',
-                    evidence: `Schema.org addressCountry: "${countryStr}"`,
-                    confidence: 98
+                    evidence: `Schema.org PostalAddress country: "${countryStr}"`,
+                    confidence: 99
                   };
                 }
               }
@@ -490,35 +501,157 @@ export function analyzeWebsiteHtmlForCountry(html: string, domain: string): { co
     }
   } catch {}
 
-  // 2. Impressum (Strictly Germany / Austria / Switzerland legal notice requirement)
-  if (lowerHtml.includes('impressum') || lowerHtml.includes('handelsregister') || lowerHtml.includes('amtsgericht')) {
-    if (lowerHtml.includes('deutschland') || lowerHtml.includes('germany') || lowerHtml.includes('berlin') || lowerHtml.includes('münchen') || lowerHtml.includes('munich') || lowerHtml.includes('frankfurt') || lowerHtml.includes('hamburg')) {
-      return {
-        country: 'Germany',
-        method: 'impressum',
-        evidence: 'Mandatory German Impressum / Commercial Register entry detected',
-        confidence: 96
-      };
-    }
-    if (lowerHtml.includes('österreich') || lowerHtml.includes('austria') || lowerHtml.includes('wien') || lowerHtml.includes('vienna')) {
-      return {
-        country: 'Austria',
-        method: 'impressum',
-        evidence: 'Austrian Impressum detected',
-        confidence: 95
-      };
-    }
-    if (lowerHtml.includes('schweiz') || lowerHtml.includes('suisse') || lowerHtml.includes('switzerland') || lowerHtml.includes('zürich') || lowerHtml.includes('zurich') || lowerHtml.includes('geneva')) {
-      return {
-        country: 'Switzerland',
-        method: 'impressum',
-        evidence: 'Swiss Impressum / Registry detected',
-        confidence: 95
-      };
+  // 2. Direct <a href="tel:..."> links with international dialing codes (High precision)
+  const telLinks = Array.from(html.matchAll(/href=["']tel:([^"']+)["']/gi))
+    .map(m => m[1].replace(/[^0-9+]/g, ''))
+    .filter(p => p.startsWith('+') && p.length >= 7);
+
+  if (telLinks.length > 0) {
+    for (const phone of telLinks) {
+      for (const [name, info] of Object.entries(GLOBAL_COUNTRIES)) {
+        for (const pCode of info.phoneCodes) {
+          if (pCode !== '+1' && phone.startsWith(pCode)) {
+            return {
+              country: name,
+              method: 'phone_code',
+              evidence: `Direct tel link dialing code: ${pCode} (${phone.slice(0, 14)})`,
+              confidence: 95
+            };
+          }
+        }
+      }
     }
   }
 
-  // 3. Meta Geotags (<meta name="geo.region" content="US-CA" /> or <meta name="geo.placename" content="London" />)
+  // 3. National Postal Codes & Address Blocks in contact/footer text
+  // UK Postcode (e.g. EC2A 4NE, SW1A 1AA, M1 1AE, W1D 3QU)
+  const ukPostcodeRegex = /\b([A-Z]{1,2}\d[A-Z\d]?\s+[0-9][A-Z]{2})\b/i;
+  if (ukPostcodeRegex.test(sanitizedText) && (lowerText.includes('london') || lowerText.includes('united kingdom') || lowerText.includes('england') || lowerText.includes('manchester') || lowerText.includes('edinburgh') || lowerText.includes('birmingham'))) {
+    const pcMatch = sanitizedText.match(ukPostcodeRegex);
+    return {
+      country: 'United Kingdom',
+      method: 'contact_page_address',
+      evidence: `UK Royal Mail Postcode verified: "${pcMatch?.[0]}"`,
+      confidence: 97
+    };
+  }
+
+  // Canadian Postal Code (e.g. K1P 1J1, M5V 3L9, H2Y 1C6)
+  const caPostcodeRegex = /\b([A-CEGHJ-NPR-TVXY]\d[A-CEGHJ-NPR-TV-Z]\s+[0-9][A-CEGHJ-NPR-TV-Z]\d)\b/i;
+  if (caPostcodeRegex.test(sanitizedText) && (lowerText.includes('canada') || lowerText.includes('ontario') || lowerText.includes('quebec') || lowerText.includes('toronto') || lowerText.includes('ottawa') || lowerText.includes('montreal') || lowerText.includes('vancouver') || lowerText.includes('calgary'))) {
+    const pcMatch = sanitizedText.match(caPostcodeRegex);
+    return {
+      country: 'Canada',
+      method: 'contact_page_address',
+      evidence: `Canadian Postal Code verified: "${pcMatch?.[0]}"`,
+      confidence: 97
+    };
+  }
+
+  // Australian Postcode & State (e.g. NSW 2000, VIC 3000, QLD 4000)
+  const auPostcodeRegex = /\b(NSW|VIC|QLD|WA|SA|TAS|ACT|NT)\s+(\d{4})\b/i;
+  if (auPostcodeRegex.test(sanitizedText)) {
+    const pcMatch = sanitizedText.match(auPostcodeRegex);
+    return {
+      country: 'Australia',
+      method: 'contact_page_address',
+      evidence: `Australian State & Postal Code verified: "${pcMatch?.[0]}"`,
+      confidence: 97
+    };
+  }
+
+  // German Postal Code + Major City (PLZ e.g. 10117 Berlin, 80333 München, 60311 Frankfurt)
+  const dePlzRegex = /\b(\d{5})\s+(Berlin|München|Munich|Frankfurt|Hamburg|Köln|Cologne|Stuttgart|Düsseldorf|Leipzig|Dortmund|Nürnberg|Bonn)\b/i;
+  if (dePlzRegex.test(sanitizedText)) {
+    const m = sanitizedText.match(dePlzRegex);
+    return {
+      country: 'Germany',
+      method: 'contact_page_address',
+      evidence: `German Postal Code (PLZ) & City verified: "${m?.[0]}"`,
+      confidence: 96
+    };
+  }
+
+  // French Postal Code + Major City (e.g. 75008 Paris, 69002 Lyon, 33000 Bordeaux)
+  const frCodeRegex = /\b(75\d{3}|69\d{3}|13\d{3}|31\d{3}|33\d{3}|59\d{3}|44\d{3})\s+(Paris|Lyon|Marseille|Toulouse|Bordeaux|Lille|Nantes)\b/i;
+  if (frCodeRegex.test(sanitizedText)) {
+    const m = sanitizedText.match(frCodeRegex);
+    return {
+      country: 'France',
+      method: 'contact_page_address',
+      evidence: `French Code Postal & City verified: "${m?.[0]}"`,
+      confidence: 96
+    };
+  }
+
+  // US State & 5-digit ZIP (e.g. CA 94103, NY 10001, TX 78701, WA 98101)
+  const usZipRegex = /\b(CA|NY|TX|WA|IL|MA|FL|GA|CO|NC|VA|PA|OH|MI|NJ|AZ)\s+(\d{5})(?:-\d{4})?\b/;
+  if (usZipRegex.test(sanitizedText) && (lowerText.includes('usa') || lowerText.includes('united states') || lowerText.includes('suite') || lowerText.includes('street') || lowerText.includes('avenue') || lowerText.includes('blvd') || lowerText.includes('san francisco') || lowerText.includes('new york') || lowerText.includes('austin') || lowerText.includes('seattle'))) {
+    const m = sanitizedText.match(usZipRegex);
+    return {
+      country: 'United States',
+      method: 'contact_page_address',
+      evidence: `US Postal Address & ZIP verified: "${m?.[0]}"`,
+      confidence: 95
+    };
+  }
+
+  // 4. Verified Impressum with official registry numbers (Handelsregister / HRB / Amtsgericht / Firmenbuch)
+  // Only triggers if the page contains actual commercial registry numbers
+  const hasCommercialRegister = /\b(?:handelsregister|registergericht|hrb\s*\d+|hra\s*\d+|amtsgericht|firmenbuch|uid-nr|ust-idnr)\b/i.test(lowerText);
+  if (hasCommercialRegister) {
+    if (lowerText.includes('österreich') || lowerText.includes('firmenbuch') || lowerText.includes('wien') || lowerText.includes('vienna')) {
+      return {
+        country: 'Austria',
+        method: 'impressum',
+        evidence: 'Official Austrian Commercial Register / Firmenbuch entry',
+        confidence: 98
+      };
+    }
+    if (lowerText.includes('schweiz') || lowerText.includes('handelsregisteramt') || lowerText.includes('zürich') || lowerText.includes('geneva')) {
+      return {
+        country: 'Switzerland',
+        method: 'impressum',
+        evidence: 'Official Swiss Commercial Register / Handelsregister entry',
+        confidence: 98
+      };
+    }
+    return {
+      country: 'Germany',
+      method: 'impressum',
+      evidence: 'Official German Commercial Register (Handelsregister / HRB / Amtsgericht) entry',
+      confidence: 98
+    };
+  }
+
+  // 5. Google Maps Embed with location
+  const gmapsMatch = html.match(/src=["']https?:\/\/(?:www\.)?google\.com\/maps\/embed[^"']*pb=([^"']+)["']/i)
+    || html.match(/src=["']https?:\/\/(?:www\.)?google\.com\/maps\?[^"']*q=([^"&']+)["']/i);
+  if (gmapsMatch) {
+    const rawPlace = decodeURIComponent(gmapsMatch[1] || '').toLowerCase();
+    for (const [name, info] of Object.entries(GLOBAL_COUNTRIES)) {
+      if (rawPlace.includes(name.toLowerCase())) {
+        return {
+          country: name,
+          method: 'contact_page_address',
+          evidence: `Google Maps embed location: "${name}"`,
+          confidence: 94
+        };
+      }
+      for (const city of info.majorCities) {
+        if (city.length >= 5 && rawPlace.includes(city.toLowerCase())) {
+          return {
+            country: name,
+            method: 'contact_page_address',
+            evidence: `Google Maps embed city: "${city}, ${name}"`,
+            confidence: 92
+          };
+        }
+      }
+    }
+  }
+
+  // 6. Meta Geotags (<meta name="geo.region" content="US-CA" />)
   const geoRegionMatch = html.match(/<meta[^>]+name=["']geo\.region["'][^>]+content=["']([a-zA-Z]{2})(?:-[a-zA-Z0-9]+)?["']/i);
   if (geoRegionMatch) {
     const isoCode = geoRegionMatch[1].toUpperCase();
@@ -527,153 +660,64 @@ export function analyzeWebsiteHtmlForCountry(html: string, domain: string): { co
         return {
           country: name,
           method: 'meta_geotag',
-          evidence: `Meta geo.region: "${geoRegionMatch[0]}"`,
-          confidence: 94
+          evidence: `Meta geo.region tag: "${geoRegionMatch[0]}"`,
+          confidence: 93
         };
       }
     }
   }
 
-  // 4. OpenGraph Locale (<meta property="og:locale" content="en_GB" />)
-  const ogLocaleMatch = html.match(/<meta[^>]+property=["']og:locale["'][^>]+content=["']([a-z]{2})_([A-Z]{2})["']/i);
-  if (ogLocaleMatch) {
-    const countryCode = ogLocaleMatch[2].toUpperCase();
-    for (const [name, info] of Object.entries(GLOBAL_COUNTRIES)) {
-      if (info.code === countryCode) {
-        // High confidence for distinct non-generic locales
-        if (countryCode !== 'US' || lowerHtml.includes('usa') || lowerHtml.includes('united states')) {
-          return {
-            country: name,
-            method: 'meta_geotag',
-            evidence: `og:locale: "${ogLocaleMatch[1]}_${countryCode}"`,
-            confidence: 88
-          };
-        }
-      }
-    }
-  }
-
-  // 5. Telephone Dialing Codes in Contact/Footer text
-  // Scan for phone numbers: e.g., "+49 30 12345", "+44 (0)20 7946 0919", "+33 1 42 68", "+81 3 5555"
-  const phoneRegex = /(?:\+|00)(1|44|49|33|39|34|31|41|43|46|47|45|358|48|351|353|32|81|82|86|91|61|64|55|52|971|966|65|27|972|90)\s*[\(\)\-.\s]*[0-9]{1,4}[\(\)\-.\s]*[0-9]{3,4}[\(\)\-.\s]*[0-9]{3,5}/g;
-  const phoneMatches = Array.from(html.matchAll(phoneRegex));
-  if (phoneMatches.length > 0) {
-    const codeCounts = new Map<string, number>();
-    for (const m of phoneMatches) {
-      const pCode = '+' + m[1];
-      codeCounts.set(pCode, (codeCounts.get(pCode) || 0) + 1);
-    }
-    
-    // Pick the most frequent phone code
-    let bestCode = '';
-    let maxCount = 0;
-    for (const [code, count] of codeCounts.entries()) {
-      if (count > maxCount) {
-        maxCount = count;
-        bestCode = code;
-      }
-    }
-
-    if (bestCode && bestCode !== '+1') { // +1 is shared by US and Canada, handled below
-      for (const [name, info] of Object.entries(GLOBAL_COUNTRIES)) {
-        if (info.phoneCodes.includes(bestCode)) {
-          return {
-            country: name,
-            method: 'phone_code',
-            evidence: `Contact phone international dialing code: ${bestCode}`,
-            confidence: 92
-          };
-        }
-      }
-    }
-  }
-
-  // 6. Distinct National Legal Entity Forms in footer or about text
-  // e.g. "Acme GmbH", "Société Générale S.A.S.", "Retail B.V.", "Trading Pty Ltd"
+  // 7. Distinct National Legal Entity Forms in footer or about text
   const legalTests: Array<{ regex: RegExp; country: string; confidence: number }> = [
-    { regex: /\b(?:gmbh\s*&\s*co\.?\s*kg|gmbh|aktiengesellschaft)\b/i, country: 'Germany', confidence: 89 },
-    { regex: /\b(?:s\.?a\.?s\.?|s\.?a\.?r\.?l\.?|sasu|société par actions simplifiée)\b/i, country: 'France', confidence: 88 },
-    { regex: /\b(?:pty\.?\s+ltd\.?|proprietary\s+limited)\b/i, country: 'Australia', confidence: 91 },
-    { regex: /\b(?:b\.?v\.?|besloten\s+vennootschap)\b/i, country: 'Netherlands', confidence: 90 },
+    { regex: /\b(?:gmbh\s*&\s*co\.?\s*kg|aktiengesellschaft)\b/i, country: 'Germany', confidence: 91 },
+    { regex: /\b(?:s\.?a\.?s\.?|sasu|société par actions simplifiée)\b/i, country: 'France', confidence: 90 },
+    { regex: /\b(?:pty\.?\s+ltd\.?|proprietary\s+limited)\b/i, country: 'Australia', confidence: 92 },
+    { regex: /\b(?:besloten\s+vennootschap)\b/i, country: 'Netherlands', confidence: 92 },
     { regex: /\b(?:sp\.?\s+z\s+o\.?o\.?|spółka\s+z\s+o\.?o\.?)\b/i, country: 'Poland', confidence: 93 },
-    { regex: /\b(?:s\.?l\.?u\.?|sociedad\s+limitada)\b/i, country: 'Spain', confidence: 87 },
-    { regex: /\b(?:s\.?r\.?l\.?|società\s+a\s+responsabilità\s+limitata)\b/i, country: 'Italy', confidence: 87 },
-    { regex: /\b(?:aktiebolag|ab\s+publ)\b/i, country: 'Sweden', confidence: 88 },
-    { regex: /\b(?:pvt\.?\s+ltd\.?|private\s+limited)\b/i, country: 'India', confidence: 86 }
+    { regex: /\b(?:s\.?l\.?u\.?|sociedad\s+limitada)\b/i, country: 'Spain', confidence: 89 },
+    { regex: /\b(?:s\.?r\.?l\.?|società\s+a\s+responsabilità\s+limitata)\b/i, country: 'Italy', confidence: 89 },
+    { regex: /\b(?:aktiebolag|ab\s+publ)\b/i, country: 'Sweden', confidence: 89 },
+    { regex: /\b(?:pvt\.?\s+ltd\.?|private\s+limited)\b/i, country: 'India', confidence: 88 }
   ];
 
   for (const test of legalTests) {
-    if (test.regex.test(html)) {
+    if (test.regex.test(sanitizedText)) {
       return {
         country: test.country,
         method: 'contact_page_address',
-        evidence: `National corporate legal form verified: "${html.match(test.regex)?.[0]}"`,
+        evidence: `National corporate legal form verified: "${sanitizedText.match(test.regex)?.[0]}"`,
         confidence: test.confidence
       };
     }
   }
 
-  // 7. City and Address mentions in text
-  // Prioritize cities paired with addresses or headquarters keywords
-  const hqAddressBlock = html.match(/(?:headquarters|head\s+office|registered\s+office|contact\s+us|our\s+office|location|address)[\s\S]{0,350}/gi);
-  const textToScan = hqAddressBlock ? hqAddressBlock.join(' ') : lowerHtml;
-
-  for (const [countryName, info] of Object.entries(GLOBAL_COUNTRIES)) {
-    // Check if country name is explicitly in the address block
-    const countryRegex = new RegExp(`\\b${countryName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
-    if (countryRegex.test(textToScan)) {
-      return {
-        country: countryName,
-        method: 'contact_page_address',
-        evidence: `Explicit country name identified in contact section: "${countryName}"`,
-        confidence: 85
-      };
-    }
-
-    // Check major cities
-    for (const city of info.majorCities) {
-      if (city.length >= 5) {
-        const cityRegex = new RegExp(`\\b${city}\\b`, 'i');
-        if (cityRegex.test(textToScan)) {
-          return {
-            country: countryName,
-            method: 'contact_page_address',
-            evidence: `Major metropolitan headquarters city located: "${city}", ${countryName}`,
-            confidence: 82
-          };
+  // 8. Contact Section Address & Headquarters keyword scanning
+  const hqAddressBlock = sanitizedText.match(/(?:headquarters|head\s+office|registered\s+office|contact\s+us|our\s+office|main\s+office)[\s\S]{0,300}/gi);
+  if (hqAddressBlock) {
+    const blockText = hqAddressBlock.join(' ').toLowerCase();
+    for (const [countryName, info] of Object.entries(GLOBAL_COUNTRIES)) {
+      const countryRegex = new RegExp(`\\b${countryName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+      if (countryRegex.test(blockText)) {
+        return {
+          country: countryName,
+          method: 'contact_page_address',
+          evidence: `Explicit headquarters location verified: "${countryName}"`,
+          confidence: 90
+        };
+      }
+      for (const city of info.majorCities) {
+        if (city.length >= 5) {
+          const cityRegex = new RegExp(`\\b${city}\\b`, 'i');
+          if (cityRegex.test(blockText)) {
+            return {
+              country: countryName,
+              method: 'contact_page_address',
+              evidence: `Headquarters city verified in contact section: "${city}, ${countryName}"`,
+              confidence: 86
+            };
+          }
         }
       }
-    }
-  }
-
-  // 8. HTML Lang tag (<html lang="de">, <html lang="ja">)
-  const langMatch = html.match(/<html[^>]+lang=["']([a-zA-Z]{2})(?:-[a-zA-Z]{2})?["']/i);
-  if (langMatch) {
-    const langCode = langMatch[1].toLowerCase();
-    const langToCountry: Record<string, string> = {
-      'de': 'Germany',
-      'fr': 'France',
-      'ja': 'Japan',
-      'it': 'Italy',
-      'nl': 'Netherlands',
-      'pl': 'Poland',
-      'sv': 'Sweden',
-      'da': 'Denmark',
-      'no': 'Norway',
-      'fi': 'Finland',
-      'ko': 'South Korea',
-      'tr': 'Turkey',
-      'cs': 'Czech Republic',
-      'pt': 'Brazil',
-      'es': 'Spain'
-    };
-    if (langToCountry[langCode]) {
-      return {
-        country: langToCountry[langCode],
-        method: 'meta_geotag',
-        evidence: `Document primary language attribute: <html lang="${langCode}">`,
-        confidence: 78
-      };
     }
   }
 
@@ -681,21 +725,13 @@ export function analyzeWebsiteHtmlForCountry(html: string, domain: string): { co
 }
 
 /**
- * Parse Search Engine snippets (DuckDuckGo, Google, etc.) to extract headquarters country
+ * Parse Search Engine snippets (DuckDuckGo, Bing, Google) to extract headquarters country
  */
 export function analyzeSearchSnippetForCountry(snippet: string, title: string = ''): { country: string; evidence: string; confidence: number } | null {
   if (!snippet && !title) return null;
   const combined = `${title} ${snippet}`.toLowerCase();
 
-  // Pattern: "headquartered in X", "headquarters in X", "based in X", "offices in X"
-  const hqPatterns = [
-    /headquartered\s+(?:in|at)\s+([A-Za-z\s,]+?)(?:\.|\;|\-|\(|\)|\n|$)/i,
-    /headquarters\s+(?:in|at|is)\s+([A-Za-z\s,]+?)(?:\.|\;|\-|\(|\)|\n|$)/i,
-    /based\s+in\s+([A-Za-z\s,]+?)(?:\.|\;|\-|\(|\)|\n|$)/i,
-    /(?:american|german|british|french|japanese|canadian|australian|italian|spanish|chinese|indian|swiss|swedish|dutch)\s+(?:company|corporation|firm|manufacturer|enterprise|retailer|agency|provider)/i
-  ];
-
-  // Check national adjective descriptors: "a German manufacturer", "an American software company"
+  // Check national demonym descriptors (e.g. "an Australian software company", "a Canadian multinational", "a German manufacturer")
   const demonymMap: Record<string, string> = {
     'american': 'United States',
     'german': 'Germany',
@@ -720,40 +756,75 @@ export function analyzeSearchSnippetForCountry(snippet: string, title: string = 
     'austrian': 'Austria',
     'belgian': 'Belgium',
     'polish': 'Poland',
-    'irish': 'Ireland'
+    'irish': 'Ireland',
+    'israeli': 'Israel',
+    'taiwanese': 'Taiwan',
+    'estonian': 'Estonia',
+    'singaporean': 'Singapore',
+    'new zealand': 'New Zealand',
+    'south african': 'South Africa'
   };
 
   for (const [demonym, country] of Object.entries(demonymMap)) {
-    const reg = new RegExp(`\\b${demonym}\\b`, 'i');
+    const reg = new RegExp(`\\b${demonym}\\b\\s+(?:multinational|software|cloud|technology|ecommerce|e-commerce|retail|industrial|financial|fintech|engineering|telecommunications|holding|conglomerate|company|corporation|firm|agency|startup|provider)`, 'i');
     if (reg.test(combined)) {
       return {
         country,
-        evidence: `Search engine verified national corporate entity: "${demonym} company"`,
-        confidence: 88
+        evidence: `Search engine verified national company entity: "${combined.match(reg)?.[0]}"`,
+        confidence: 94
       };
     }
   }
 
-  // Check explicit country mentions in snippet
+  // Headquartered in [City, Country] or [City], [Country]
+  const hqMatches = combined.match(/headquartered\s+(?:in|at)\s+([A-Za-z\s,]+?)(?:\.|\;|\-|\(|\)|\n|$)/i)
+    || combined.match(/headquarters\s+(?:in|at|is)\s+([A-Za-z\s,]+?)(?:\.|\;|\-|\(|\)|\n|$)/i)
+    || combined.match(/based\s+in\s+([A-Za-z\s,]+?)(?:\.|\;|\-|\(|\)|\n|$)/i)
+    || combined.match(/founded\s+in\s+([A-Za-z\s,]+?)(?:\.|\;|\-|\(|\)|\n|$)/i);
+
+  if (hqMatches) {
+    const phrase = hqMatches[1].toLowerCase();
+    for (const [name, info] of Object.entries(GLOBAL_COUNTRIES)) {
+      if (phrase.includes(name.toLowerCase())) {
+        return {
+          country: name,
+          evidence: `Search engine verified: "${hqMatches[0].trim()}"`,
+          confidence: 92
+        };
+      }
+      for (const city of info.majorCities) {
+        if (city.length >= 4 && phrase.includes(city.toLowerCase())) {
+          return {
+            country: name,
+            evidence: `Search engine verified headquarters city: "${city}, ${name}"`,
+            confidence: 90
+          };
+        }
+      }
+    }
+  }
+
+  // Check explicit country mentions in context
   for (const [name, info] of Object.entries(GLOBAL_COUNTRIES)) {
     const nameRegex = new RegExp(`\\b(?:in|at|from)\\s+${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
     if (nameRegex.test(combined)) {
       return {
         country: name,
-        evidence: `Search engine identified headquarters in ${name}`,
+        evidence: `Search engine confirmed location in ${name}`,
         confidence: 86
       };
     }
 
-    // Check cities
+    const AMBIGUOUS_CITY_WORDS = new Set(['reading', 'mobile', 'nice', 'split', 'deal', 'bath', 'hull', 'normal', 'orange', 'florence', 'victoria', 'darwin']);
     for (const city of info.majorCities) {
-      if (city.length >= 6) {
-        const cityRegex = new RegExp(`\\b(?:in|at|near)\\s+${city}\\b`, 'i');
+      const lowerCity = city.toLowerCase();
+      if (city.length >= 5 && !AMBIGUOUS_CITY_WORDS.has(lowerCity)) {
+        const cityRegex = new RegExp(`\\b(?:in|at|near|from|headquarters|office|hub|store)?\\s*${city}\\b`, 'i');
         if (cityRegex.test(combined)) {
           return {
             country: name,
             evidence: `Search engine identified location in ${city}, ${name}`,
-            confidence: 83
+            confidence: 85
           };
         }
       }

@@ -2,11 +2,11 @@
  * Deep Country Resolution Engine
  * Goes deep for ambiguous and generic domains (.com, .net, .org, .io, .co, etc.)
  * by combining:
- * 1. Offline high-speed corporate registry & ccTLD maps
- * 2. Live website contact page & impressum deep scraping (Schema.org address, phone dialing codes, legal entity forms)
- * 3. Multi-engine search grounding (DuckDuckGo Instant Answer, DuckDuckGo Organic, Google search)
+ * 1. Offline high-speed corporate registry & ccTLD maps (0ms)
+ * 2. Live website contact page & impressum deep scraping (Schema.org, tel: dialing codes, postal codes, legal forms)
+ * 3. Multi-engine search grounding (DuckDuckGo Instant Answer, Bing Organic Search, Wikipedia Knowledge Graph)
  * 4. DNS MX mail exchanger host country deduction
- * 5. Gemini AI synthesis (when API key is configured)
+ * 5. Gemini 2.5/3.0 AI synthesis with Google Search grounding (when API key is configured)
  */
 
 import dns from 'dns';
@@ -67,8 +67,8 @@ async function crawlWebsiteForCountry(domain: string): Promise<DomainCountryReso
 
   // 2. Analyze Homepage Content
   if (homepageHtml) {
-    const homeAnalysis = analyzeWebsiteHtmlForCountry(homepageHtml, cleanDomain);
-    if (homeAnalysis && homeAnalysis.confidence >= 85) {
+    const homeAnalysis = analyzeWebsiteHtmlForCountry(homepageHtml, cleanDomain, successfulBase);
+    if (homeAnalysis && homeAnalysis.confidence >= 94) {
       return {
         domain: cleanDomain,
         country: homeAnalysis.country,
@@ -81,42 +81,50 @@ async function crawlWebsiteForCountry(domain: string): Promise<DomainCountryReso
 
     // 3. Proactively Probe Contact & Impressum Pages
     // Discover contact links in homepage HTML or try standard paths
-    const contactPaths = ['/contact', '/contact-us', '/impressum', '/kontakt', '/about', '/about-us', '/legal'];
-    const contactLinksFound = Array.from(homepageHtml.matchAll(/<a[^>]+href=["']([^"']*(?:contact|impressum|kontakt|about)[^"']*)["']/gi))
-      .map(m => m[1])
-      .filter(href => !href.startsWith('#') && !href.startsWith('mailto:') && !href.startsWith('tel:'))
-      .slice(0, 3);
+    const contactLinksFound = Array.from(
+      homepageHtml.matchAll(/<a[^>]+href=["']([^"']*(?:contact|impressum|kontakt|about|locations|offices|legal)[^"']*)["']/gi)
+    )
+      .map(m => m[1].trim())
+      .filter(href => !href.startsWith('#') && !href.startsWith('mailto:') && !href.startsWith('tel:') && !href.startsWith('javascript:'));
 
     const pagesToProbe = new Set<string>();
     for (const link of contactLinksFound) {
-      if (link.startsWith('http')) {
-        pagesToProbe.add(link);
-      } else if (successfulBase) {
-        pagesToProbe.add(new URL(link, successfulBase).href);
-      }
-    }
-    // Add default fallbacks
-    for (const p of contactPaths.slice(0, 3)) {
-      if (successfulBase) pagesToProbe.add(`${successfulBase}${p}`);
+      try {
+        if (link.startsWith('http://') || link.startsWith('https://')) {
+          pagesToProbe.add(link);
+        } else if (successfulBase) {
+          const resolved = new URL(link, successfulBase).href;
+          pagesToProbe.add(resolved);
+        }
+      } catch {}
     }
 
-    for (const pageUrl of Array.from(pagesToProbe).slice(0, 4)) {
+    // Add standard fallback paths
+    const standardPaths = ['/contact', '/contact-us', '/about', '/about-us', '/impressum', '/locations'];
+    for (const p of standardPaths) {
+      if (successfulBase) pagesToProbe.add(`${successfulBase.replace(/\/$/, '')}${p}`);
+    }
+
+    // Probe up to 3 candidate pages
+    const probeList = Array.from(pagesToProbe).slice(0, 3);
+    for (const pageUrl of probeList) {
       try {
         const contactRes = await fetch(pageUrl, {
           headers: BROWSER_HEADERS,
           redirect: 'follow',
-          signal: AbortSignal.timeout(2800)
+          signal: AbortSignal.timeout(3000)
         });
         if (contactRes.ok) {
           const contactHtml = await contactRes.text();
-          const contactAnalysis = analyzeWebsiteHtmlForCountry(contactHtml, cleanDomain);
+          const contactAnalysis = analyzeWebsiteHtmlForCountry(contactHtml, cleanDomain, pageUrl);
           if (contactAnalysis) {
+            const shortPath = pageUrl.replace(/^https?:\/\/[^\/]+/, '') || '/';
             return {
               domain: cleanDomain,
               country: contactAnalysis.country,
               confidence: contactAnalysis.confidence,
               method: contactAnalysis.method,
-              evidence: `${contactAnalysis.evidence} (verified on ${pageUrl.replace(/^https?:\/\/[^\/]+/, '') || '/'})`,
+              evidence: `${contactAnalysis.evidence} (verified on ${shortPath})`,
               flag: getCountryFlag(contactAnalysis.country)
             };
           }
@@ -124,7 +132,7 @@ async function crawlWebsiteForCountry(domain: string): Promise<DomainCountryReso
       } catch {}
     }
 
-    // If home had a lower confidence match, return it now
+    // If home had an acceptable match, return it
     if (homeAnalysis) {
       return {
         domain: cleanDomain,
@@ -142,18 +150,26 @@ async function crawlWebsiteForCountry(domain: string): Promise<DomainCountryReso
 
 /**
  * Multi-Engine Search Grounding for Domain Headquarters
+ * Combines DuckDuckGo Instant Answer, Bing Organic Search, and Wikipedia API
  */
 async function searchEngineCountryGrounding(domain: string): Promise<DomainCountryResolution | null> {
   const cleanDomain = cleanDomainName(domain);
+  const companyName = cleanDomain
+    .replace(/\.[a-z]{2,}(\.[a-z]{2,})?$/i, '')
+    .replace(/[-_]/g, ' ')
+    .trim();
 
-  // 1. DuckDuckGo Instant Answer API (Instant, structured, zero rate limits)
+  // Tier 1: DuckDuckGo Instant Answer API (Direct company name)
   try {
-    const ddgApiUrl = `https://api.duckduckgo.com/?q=${encodeURIComponent(cleanDomain)}&format=json&no_html=1&skip_disambig=1`;
-    const ddgRes = await fetch(ddgApiUrl, { signal: AbortSignal.timeout(2500) });
+    const ddgApiUrl = `https://api.duckduckgo.com/?q=${encodeURIComponent(companyName)}&format=json&no_html=1&skip_disambig=1`;
+    const ddgRes = await fetch(ddgApiUrl, {
+      headers: { "User-Agent": "Mozilla/5.0" },
+      signal: AbortSignal.timeout(2800)
+    });
     if (ddgRes.ok) {
       const data = await ddgRes.json();
-      const text = `${data.Heading || ''} ${data.AbstractText || ''}`;
-      if (text.trim().length >= 25) {
+      const text = `${data.Heading || ''} ${data.AbstractText || ''}`.trim();
+      if (text.length >= 25) {
         const analysis = analyzeSearchSnippetForCountry(text, data.Heading);
         if (analysis) {
           return {
@@ -161,7 +177,7 @@ async function searchEngineCountryGrounding(domain: string): Promise<DomainCount
             country: analysis.country,
             confidence: analysis.confidence,
             method: 'search_engine',
-            evidence: `DuckDuckGo Instant Answer: ${analysis.evidence}`,
+            evidence: `Search Engine (DuckDuckGo Knowledge): ${analysis.evidence}`,
             flag: getCountryFlag(analysis.country)
           };
         }
@@ -169,29 +185,58 @@ async function searchEngineCountryGrounding(domain: string): Promise<DomainCount
     }
   } catch {}
 
-  // 2. DuckDuckGo Organic Search Engine
+  // Tier 2: DuckDuckGo Instant Answer API (With "company" suffix)
   try {
-    const dorkQuery = `"${cleanDomain}" (headquarters OR "head office" OR "contact us" OR impressum OR address)`;
-    const ddgHtmlUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(dorkQuery)}`;
-    const ddgRes = await fetch(ddgHtmlUrl, {
-      headers: BROWSER_HEADERS,
-      signal: AbortSignal.timeout(3200)
+    const ddgCompanyUrl = `https://api.duckduckgo.com/?q=${encodeURIComponent(companyName + ' company')}&format=json&no_html=1&skip_disambig=1`;
+    const ddgCompRes = await fetch(ddgCompanyUrl, {
+      headers: { "User-Agent": "Mozilla/5.0" },
+      signal: AbortSignal.timeout(2800)
+    });
+    if (ddgCompRes.ok) {
+      const data = await ddgCompRes.json();
+      const text = `${data.Heading || ''} ${data.AbstractText || ''}`.trim();
+      if (text.length >= 25) {
+        const analysis = analyzeSearchSnippetForCountry(text, data.Heading);
+        if (analysis) {
+          return {
+            domain: cleanDomain,
+            country: analysis.country,
+            confidence: analysis.confidence,
+            method: 'search_engine',
+            evidence: `Search Engine (DuckDuckGo Corporate Graph): ${analysis.evidence}`,
+            flag: getCountryFlag(analysis.country)
+          };
+        }
+      }
+    }
+  } catch {}
+
+  // Tier 3: Bing Organic Search Engine (Captions extraction)
+  try {
+    const bingUrl = `https://www.bing.com/search?q=${encodeURIComponent('"' + cleanDomain + '" company headquarters country')}&setlang=en`;
+    const bingRes = await fetch(bingUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9"
+      },
+      signal: AbortSignal.timeout(3500)
     });
 
-    if (ddgRes.ok) {
-      const html = await ddgRes.text();
-      const snippetMatches = Array.from(html.matchAll(/<a[^>]+class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/gi));
-      for (const sm of snippetMatches) {
-        const cleanSnippet = sm[1].replace(/<[^>]*>/g, '').trim();
-        if (cleanSnippet.length >= 30) {
-          const analysis = analyzeSearchSnippetForCountry(cleanSnippet);
+    if (bingRes.ok) {
+      const html = await bingRes.text();
+      const captions = Array.from(html.matchAll(/<div[^>]+class="[^"]*b_caption[^"]*"[^>]*>([\s\S]*?)<\/div>/gi))
+        .map(m => m[1].replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim());
+
+      for (const cap of captions) {
+        if (cap.length >= 25) {
+          const analysis = analyzeSearchSnippetForCountry(cap);
           if (analysis) {
             return {
               domain: cleanDomain,
               country: analysis.country,
               confidence: analysis.confidence,
               method: 'search_engine',
-              evidence: `DuckDuckGo Search snippet: ${analysis.evidence}`,
+              evidence: `Search Engine (Bing Grounding): ${analysis.evidence}`,
               flag: getCountryFlag(analysis.country)
             };
           }
@@ -200,32 +245,25 @@ async function searchEngineCountryGrounding(domain: string): Promise<DomainCount
     }
   } catch {}
 
-  // 3. Google Organic Search Engine (fallback)
+  // Tier 4: Wikipedia Search & Knowledge Graph API
   try {
-    const gQuery = `"${cleanDomain}" headquarters OR "contact us" OR country`;
-    const gUrl = `https://www.google.com/search?q=${encodeURIComponent(gQuery)}&hl=en`;
-    const gRes = await fetch(gUrl, {
-      headers: BROWSER_HEADERS,
-      signal: AbortSignal.timeout(3200)
-    });
-
-    if (gRes.ok) {
-      const gHtml = await gRes.text();
-      const snippetMatches = Array.from(gHtml.matchAll(/<div[^>]+class="[^"]*(?:BNeawe\s+s3v9rd|VwiC3b|yXK7lf)[^"]*"[^>]*>([\s\S]*?)<\/div>/gi));
-      for (const sm of snippetMatches) {
-        const text = sm[1].replace(/<[^>]*>/g, '').trim();
-        if (text.length >= 30 && !text.includes('Missing:') && !text.includes('Must include:')) {
-          const analysis = analyzeSearchSnippetForCountry(text);
-          if (analysis) {
-            return {
-              domain: cleanDomain,
-              country: analysis.country,
-              confidence: analysis.confidence,
-              method: 'search_engine',
-              evidence: `Google Search snippet: ${analysis.evidence}`,
-              flag: getCountryFlag(analysis.country)
-            };
-          }
+    const wikiUrl = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(companyName + ' company headquarters')}&format=json&origin=*`;
+    const wikiRes = await fetch(wikiUrl, { signal: AbortSignal.timeout(3000) });
+    if (wikiRes.ok) {
+      const wikiData = await wikiRes.json();
+      const firstHit = wikiData.query?.search?.[0];
+      if (firstHit && firstHit.snippet) {
+        const cleanSnippet = firstHit.snippet.replace(/<[^>]*>/g, ' ').trim();
+        const analysis = analyzeSearchSnippetForCountry(cleanSnippet, firstHit.title);
+        if (analysis) {
+          return {
+            domain: cleanDomain,
+            country: analysis.country,
+            confidence: analysis.confidence,
+            method: 'search_engine',
+            evidence: `Wikipedia Knowledge Base: ${analysis.evidence}`,
+            flag: getCountryFlag(analysis.country)
+          };
         }
       }
     }
@@ -248,42 +286,41 @@ async function checkDnsMxCountry(domain: string): Promise<DomainCountryResolutio
         const parts = mxHost.split('.');
         const lastPart = parts[parts.length - 1];
         
-        // Exclude generic global mail hosts (google, outlook, protonmail, etc.)
-        if (['com', 'net', 'org'].includes(lastPart)) {
-          if (mxHost.includes('ovh.net')) {
-            return {
-              domain: cleanDomain,
-              country: 'France',
-              confidence: 76,
-              method: 'cctld',
-              evidence: `Regional French MX mail provider: ${record.exchange}`,
-              flag: getCountryFlag('France')
-            };
-          }
-          if (mxHost.includes('hetzner')) {
-            return {
-              domain: cleanDomain,
-              country: 'Germany',
-              confidence: 76,
-              method: 'cctld',
-              evidence: `Regional German MX host: ${record.exchange}`,
-              flag: getCountryFlag('Germany')
-            };
-          }
-          continue;
+        // Check regional hosting giants
+        if (mxHost.includes('ovh.net') || mxHost.includes('ovh.com')) {
+          return {
+            domain: cleanDomain,
+            country: 'France',
+            confidence: 82,
+            method: 'cctld',
+            evidence: `Regional French MX mail provider: ${record.exchange}`,
+            flag: getCountryFlag('France')
+          };
+        }
+        if (mxHost.includes('hetzner')) {
+          return {
+            domain: cleanDomain,
+            country: 'Germany',
+            confidence: 82,
+            method: 'cctld',
+            evidence: `Regional German MX infrastructure: ${record.exchange}`,
+            flag: getCountryFlag('Germany')
+          };
         }
 
-        // Check if MX host has a distinct ccTLD (.de, .fr, .it, .uk, .jp, .ch, etc.)
-        for (const [countryName, info] of Object.entries(GLOBAL_COUNTRIES)) {
-          if (info.cctld === lastPart) {
-            return {
-              domain: cleanDomain,
-              country: countryName,
-              confidence: 84,
-              method: 'cctld',
-              evidence: `Official MX mail server registered under .${lastPart} (${record.exchange})`,
-              flag: info.flag
-            };
+        // Check if MX host has a distinct ccTLD (.de, .fr, .it, .uk, .jp, .ch, .ca, .au, etc.)
+        if (!['com', 'net', 'org', 'io'].includes(lastPart)) {
+          for (const [countryName, info] of Object.entries(GLOBAL_COUNTRIES)) {
+            if (info.cctld === lastPart) {
+              return {
+                domain: cleanDomain,
+                country: countryName,
+                confidence: 85,
+                method: 'cctld',
+                evidence: `Official MX mail server registered under .${lastPart} (${record.exchange})`,
+                flag: info.flag
+              };
+            }
           }
         }
       }
@@ -294,7 +331,7 @@ async function checkDnsMxCountry(domain: string): Promise<DomainCountryResolutio
 }
 
 /**
- * AI Grounding with Gemini (Optional fallback for remaining tricky domains)
+ * AI Grounding with Gemini 3.8 Flash & Google Search (Optional fallback)
  */
 async function aiCountryReasoning(domains: string[], apiKey?: string): Promise<Map<string, DomainCountryResolution>> {
   const results = new Map<string, DomainCountryResolution>();
@@ -311,28 +348,30 @@ Return strictly a JSON array of objects with the exact structure:
 [
   { "domain": "example.com", "country": "Country Name", "confidence": 90, "reason": "Brief 1-sentence explanation" }
 ]
-Only use recognized sovereign country names (e.g. "United States", "Germany", "United Kingdom", "France", "Japan", etc.). If completely impossible to determine, set country to "Unknown".`;
+Only use recognized sovereign country names (e.g. "United States", "Germany", "United Kingdom", "France", "Japan", "Canada", "Australia", etc.). If completely impossible to determine, set country to "Unknown".`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3.8-flash',
       contents: prompt,
       config: {
-        responseMimeType: 'application/json'
+        tools: [{ googleSearch: {} }]
       }
     });
 
     const jsonText = response.text?.trim() || '';
     if (jsonText) {
-      const parsed = JSON.parse(jsonText);
+      // Clean possible code blocks from response
+      const cleanJson = jsonText.replace(/^```json/i, '').replace(/^```/, '').replace(/```$/, '').trim();
+      const parsed = JSON.parse(cleanJson);
       if (Array.isArray(parsed)) {
         for (const item of parsed) {
           if (item && item.domain && item.country && item.country !== 'Unknown') {
             results.set(cleanDomainName(item.domain), {
               domain: cleanDomainName(item.domain),
               country: item.country,
-              confidence: item.confidence || 85,
+              confidence: item.confidence || 90,
               method: 'ai_grounding',
-              evidence: item.reason || 'Gemini corporate grounding verified headquarters',
+              evidence: item.reason || 'Gemini Google Search grounding verified headquarters',
               flag: getCountryFlag(item.country)
             });
           }
@@ -369,7 +408,7 @@ export async function resolveDomainDeeply(domain: string, apiKey?: string): Prom
       country: offlineMatch,
       confidence: isCorp ? 99 : 98,
       method: isCorp ? 'corporate_registry' : 'cctld',
-      evidence: isCorp ? 'Global enterprise corporate headquarters registry' : `ccTLD country code extension: .${cleanDomain.split('.').pop()}`,
+      evidence: isCorp ? `Global enterprise corporate registry (${offlineMatch})` : `ccTLD country code extension: .${cleanDomain.split('.').pop()}`,
       flag: getCountryFlag(offlineMatch)
     };
     resolutionCache.set(cleanDomain, res);
@@ -405,7 +444,7 @@ export async function resolveDomainDeeply(domain: string, apiKey?: string): Prom
     console.warn(`[Deep Country] Web crawl notice for ${cleanDomain}:`, e.message);
   }
 
-  // Step B: Multi-Engine Search Grounding (DuckDuckGo / Google)
+  // Step B: Multi-Engine Search Grounding (DuckDuckGo / Bing / Wikipedia)
   try {
     const searchResult = await searchEngineCountryGrounding(cleanDomain);
     if (searchResult && searchResult.country !== 'Unknown') {
@@ -431,7 +470,7 @@ export async function resolveDomainDeeply(domain: string, apiKey?: string): Prom
     country: 'Unknown',
     confidence: 0,
     method: 'unknown',
-    evidence: 'Domain has generic extension (.com/.net/.org) with no public physical contact page or search entity',
+    evidence: 'Generic domain extension (.com/.net/.org) with no public physical contact address or search entity located',
     flag: '🌐'
   };
 
