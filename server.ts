@@ -681,16 +681,19 @@ async function startServer() {
     }
   });
 
-  // Live Domain Website & Search Intelligence Endpoint
+  // Live Domain Website & Google Search Intelligence Endpoint
   app.post("/api/domain-intelligence", async (req, res) => {
-    const { domains } = req.body;
+    const { domains, apiKey } = req.body;
     if (!Array.isArray(domains) || domains.length === 0) {
       return res.status(400).json({ error: "Domains array required" });
     }
 
+    const headerKey = req.headers['x-gemini-api-key'] as string;
+    const effectiveKey = (typeof apiKey === 'string' && apiKey.trim()) || (headerKey && headerKey.trim()) || process.env.GEMINI_API_KEY;
+
     try {
-      console.log(`[Domain Intelligence API] Request for ${domains.length} domains`);
-      const results = await enrichDomainsIntelligence(domains);
+      console.log(`[Domain Intelligence API] Request for ${domains.length} domains (Key provided: ${Boolean(effectiveKey)})`);
+      const results = await enrichDomainsIntelligence(domains, effectiveKey);
       res.json({ results });
     } catch (err: any) {
       console.error("[Domain Intelligence API] Error:", err?.message || err);

@@ -11,6 +11,8 @@ export interface CompanyIntel {
   companyName: string;
   industry: string;
   subCategory?: string;
+  productCategory?: string; // Main product/service category classification
+  primaryProducts?: string[]; // Core products or services offered
   overview: string;
   businessModel?: string;
   headquarters?: string;
@@ -19,6 +21,9 @@ export interface CompanyIntel {
   searchSnippet?: string;
   websiteUrl?: string;
   websiteStatus: 'online' | 'unreachable' | 'offline';
+  websiteSnippet?: string;
+  headings?: string[];
+  groundingSource?: string;
   favicon?: string;
   confidenceScore?: number;
   isAiEnhanced?: boolean;
@@ -27,6 +32,12 @@ export interface CompanyIntel {
 
 export interface IndustryGroupIntel {
   industry: string;
+  emails: string[];
+  companies: CompanyIntel[];
+}
+
+export interface ProductGroupIntel {
+  productCategory: string;
   emails: string[];
   companies: CompanyIntel[];
 }

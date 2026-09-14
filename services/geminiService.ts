@@ -200,15 +200,20 @@ export const identifyIndustriesForDomains = async (
  * queries search engine snippets, and runs high-accuracy company profiling.
  */
 export const fetchDomainIntelligence = async (
-    domains: string[]
+    domains: string[],
+    customApiKey?: string
 ): Promise<CompanyIntel[]> => {
     if (!domains || domains.length === 0) return [];
 
     try {
+        const effectiveKey = customApiKey || (typeof window !== 'undefined' ? localStorage.getItem('gemini_api_key') || '' : '');
         const res = await fetch('/api/domain-intelligence', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ domains })
+            headers: { 
+                'Content-Type': 'application/json',
+                ...(effectiveKey ? { 'x-gemini-api-key': effectiveKey } : {})
+            },
+            body: JSON.stringify({ domains, apiKey: effectiveKey })
         });
 
         if (res.ok) {

@@ -9,6 +9,7 @@ import ClipboardIcon from './icons/ClipboardIcon';
 import CheckIcon from './icons/CheckIcon';
 import SparklesIcon from './icons/SparklesIcon';
 import LinkIcon from './icons/LinkIcon';
+import TagIcon from './icons/TagIcon';
 
 interface CompanyDossierModalProps {
   company: CompanyIntel | null;
@@ -36,6 +37,8 @@ const CompanyDossierModal: React.FC<CompanyDossierModalProps> = ({
     const text = [
       `Company: ${company.companyName} (${company.domain})`,
       `Industry: ${company.industry}${company.subCategory ? ` - ${company.subCategory}` : ''}`,
+      company.productCategory ? `Product Category: ${company.productCategory}` : '',
+      company.primaryProducts && company.primaryProducts.length > 0 ? `Primary Products: ${company.primaryProducts.join(', ')}` : '',
       `Business Model: ${company.businessModel || 'B2B'}`,
       `Headquarters: ${company.headquarters || 'Global'}`,
       `Website: ${company.websiteUrl || `https://${company.domain}`} [${company.websiteStatus}]`,
@@ -124,6 +127,12 @@ const CompanyDossierModal: React.FC<CompanyDossierModalProps> = ({
                 {company.subCategory}
               </span>
             )}
+            {company.productCategory && (
+              <span className="flex items-center gap-1.5 px-3 py-1 bg-amber-950/60 border border-amber-700/40 text-amber-300 rounded-lg text-xs font-semibold">
+                <TagIcon className="w-3.5 h-3.5 text-amber-400" />
+                {company.productCategory}
+              </span>
+            )}
             {company.businessModel && (
               <span className="flex items-center gap-1.5 px-3 py-1 bg-indigo-950/60 border border-indigo-700/40 text-indigo-300 rounded-lg text-xs font-medium">
                 {company.businessModel}
@@ -142,21 +151,41 @@ const CompanyDossierModal: React.FC<CompanyDossierModalProps> = ({
           </div>
 
           {/* OVERVIEW */}
-          <div className="bg-gray-900/50 border border-gray-700/70 rounded-xl p-4">
-            <div className="text-xs uppercase tracking-wider font-bold text-gray-400 mb-2 flex items-center gap-1.5">
-              <SparklesIcon className="w-3.5 h-3.5 text-purple-400" />
-              Company Intelligence & What They Do
+          <div className="bg-gray-900/50 border border-gray-700/70 rounded-xl p-4 space-y-3">
+            <div>
+              <div className="text-xs uppercase tracking-wider font-bold text-gray-400 mb-2 flex items-center gap-1.5">
+                <SparklesIcon className="w-3.5 h-3.5 text-purple-400" />
+                Company Intelligence & What They Do
+              </div>
+              <p className="text-gray-200 text-sm leading-relaxed">
+                {company.overview}
+              </p>
             </div>
-            <p className="text-gray-200 text-sm leading-relaxed">
-              {company.overview}
-            </p>
+
+            {company.primaryProducts && company.primaryProducts.length > 0 && (
+              <div className="pt-2 border-t border-gray-800">
+                <span className="text-xs text-amber-400 font-semibold block mb-1.5 flex items-center gap-1">
+                  <TagIcon className="w-3.5 h-3.5 text-amber-400" />
+                  Primary Products & Services Identified
+                </span>
+                <div className="flex flex-wrap gap-1.5">
+                  {company.primaryProducts.map((prod, idx) => (
+                    <span key={idx} className="text-xs px-2.5 py-1 bg-amber-950/40 text-amber-200 rounded-lg border border-amber-800/40 font-medium">
+                      {prod}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
 
-          {/* METADATA INSPECTION */}
+          {/* METADATA & WEB GROUNDING INSPECTION */}
           <div className="bg-gray-900/40 border border-gray-700/50 rounded-xl p-4 space-y-3">
             <div className="text-xs uppercase tracking-wider font-bold text-gray-400 flex items-center justify-between">
-              <span>Domain Meta Tags & Web Signals</span>
-              <span className="text-[11px] text-gray-500 font-mono">Live Extraction</span>
+              <span>Website Content & Search Engine Grounding</span>
+              <span className="text-[11px] text-purple-300 font-medium px-2 py-0.5 rounded bg-purple-950/80 border border-purple-800/40">
+                {company.groundingSource || 'Live Web Crawl & Index'}
+              </span>
             </div>
 
             {company.title && (
@@ -168,19 +197,41 @@ const CompanyDossierModal: React.FC<CompanyDossierModalProps> = ({
               </div>
             )}
 
+            {company.headings && company.headings.length > 0 && (
+              <div>
+                <span className="text-xs text-gray-400 font-semibold block mb-0.5">Key Product & Service Headings (H1 / H2)</span>
+                <div className="flex flex-wrap gap-1.5 p-2 bg-gray-800/80 rounded-lg border border-gray-700/50">
+                  {company.headings.map((h, idx) => (
+                    <span key={idx} className="text-[11px] px-2 py-0.5 bg-gray-700/70 text-gray-200 rounded border border-gray-600/40">
+                      {h}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {company.metaDescription && (
               <div>
-                <span className="text-xs text-gray-400 font-semibold block mb-0.5">Meta Description (HTML Tag)</span>
+                <span className="text-xs text-gray-400 font-semibold block mb-0.5">Website Meta Description (HTML Tag)</span>
                 <div className="text-xs text-gray-300 bg-gray-800/80 p-2.5 rounded-lg border border-gray-700/50 leading-relaxed">
                   {company.metaDescription}
                 </div>
               </div>
             )}
 
+            {company.websiteSnippet && (
+              <div>
+                <span className="text-xs text-gray-400 font-semibold block mb-0.5">Extracted Website Body Text (Products & Operations)</span>
+                <div className="text-xs text-gray-300 bg-gray-800/80 p-2.5 rounded-lg border border-gray-700/50 leading-relaxed italic">
+                  "{company.websiteSnippet}"
+                </div>
+              </div>
+            )}
+
             {company.searchSnippet && (
               <div>
-                <span className="text-xs text-gray-400 font-semibold block mb-0.5">Search Engine Index Snippet (Google / Web Index)</span>
-                <div className="text-xs text-gray-300 bg-gray-800/80 p-2.5 rounded-lg border border-gray-700/50 leading-relaxed">
+                <span className="text-xs text-gray-400 font-semibold block mb-0.5">Google / Search Engine Snippet</span>
+                <div className="text-xs text-emerald-300/90 bg-gray-800/80 p-2.5 rounded-lg border border-emerald-800/40 leading-relaxed">
                   {company.searchSnippet}
                 </div>
               </div>

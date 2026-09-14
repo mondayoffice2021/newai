@@ -1,5 +1,5 @@
 import React, { useState, useRef, useMemo } from 'react';
-import type { CompanyIntel, IndustryGroupIntel } from '../types';
+import type { CompanyIntel, IndustryGroupIntel, ProductGroupIntel } from '../types';
 import { fetchDomainIntelligence } from '../services/geminiService';
 import { classifyIndustryOffline, classifyCountryOffline } from '../services/offlineClassifier';
 import { extractEmailsFromFile } from '../services/fileService';
@@ -20,6 +20,10 @@ import ListBulletIcon from './icons/ListBulletIcon';
 import FunnelIcon from './icons/FunnelIcon';
 import MagnifyingGlassIcon from './icons/MagnifyingGlassIcon';
 import LinkIcon from './icons/LinkIcon';
+import TagIcon from './icons/TagIcon';
+import ArrowDownTrayIcon from './icons/ArrowDownTrayIcon';
+import ClipboardIcon from './icons/ClipboardIcon';
+import CheckIcon from './icons/CheckIcon';
 import ToggleSwitch from './ToggleSwitch';
 import CompanyDossierModal from './CompanyDossierModal';
 import JSZip from 'jszip';
@@ -46,9 +50,12 @@ const EmailAnalyzer: React.FC<EmailAnalyzerProps> = ({ showToast }) => {
   // Filter & Search states
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedIndustry, setSelectedIndustry] = useState('All');
-  const [viewMode, setViewMode] = useState<'companies' | 'industries'>('companies');
+  const [selectedProductCategory, setSelectedProductCategory] = useState('All');
+  const [viewMode, setViewMode] = useState<'companies' | 'products' | 'industries'>('companies');
   const [selectedCompanyForModal, setSelectedCompanyForModal] = useState<CompanyIntel | null>(null);
   const [expandedEmailsDomain, setExpandedEmailsDomain] = useState<string | null>(null);
+  const [refreshingDomain, setRefreshingDomain] = useState<string | null>(null);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
 
   // Keep screen awake while industry batch analysis is executing
   useActiveWakeLock(isProcessing, 'Industry Analyzer: Company Discovery');
@@ -56,6 +63,31 @@ const EmailAnalyzer: React.FC<EmailAnalyzerProps> = ({ showToast }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const rawFileContent = useRef<string | null>(null);
   const controlRef = useRef({ shouldStop: false, isPaused: false });
+
+  // On-demand re-query for a specific company using live website and Google search grounding
+  const handleRequeryCompany = async (companyToRefresh: CompanyIntel) => {
+    setRefreshingDomain(companyToRefresh.domain);
+    showToast(`Querying Google & live website for ${companyToRefresh.companyName}...`);
+    try {
+      const apiKey = localStorage.getItem('gemini_api_key') || '';
+      const freshResults = await fetchDomainIntelligence([companyToRefresh.domain], apiKey);
+      if (freshResults.length > 0) {
+        const updated: CompanyIntel = {
+          ...freshResults[0],
+          emails: companyToRefresh.emails
+        };
+        setCompanies(prev => prev.map(c => c.domain === companyToRefresh.domain ? updated : c));
+        if (selectedCompanyForModal && selectedCompanyForModal.domain === companyToRefresh.domain) {
+          setSelectedCompanyForModal(updated);
+        }
+        showToast(`Updated ${companyToRefresh.companyName} with live web & Google search data!`);
+      }
+    } catch (err: any) {
+      showToast(`Notice: ${err?.message || 'Could not refresh'}`);
+    } finally {
+      setRefreshingDomain(null);
+    }
+  };
 
   // Handle file reading from upload input
   const handleFile = async (file: File) => {
@@ -158,7 +190,7 @@ const EmailAnalyzer: React.FC<EmailAnalyzerProps> = ({ showToast }) => {
     return Array.from(map.entries())
       .map(([industry, val]) => ({
         industry,
-        emails: val.emails,
+        emails: Array.from(new Set(val.emails)),
         companies: val.companies
       }))
       .sort((a, b) => b.companies.length - a.companies.length);
@@ -170,28 +202,108 @@ const EmailAnalyzer: React.FC<EmailAnalyzerProps> = ({ showToast }) => {
     return ['All', ...list];
   }, [industryGroups]);
 
-  // Filtered companies based on search query & industry pill
+  // Group companies and emails by Product / Service Category
+  const productGroups: ProductGroupIntel[] = useMemo(() => {
+    const map = new Map<string, { emails: string[]; companies: CompanyIntel[] }>();
+    companies.forEach(company => {
+      const cat = company.productCategory || company.subCategory || 'General Products & Services';
+      if (!map.has(cat)) {
+        map.set(cat, { emails: [], companies: [] });
+      }
+      const group = map.get(cat)!;
+      group.companies.push(company);
+      group.emails.push(...company.emails);
+    });
+
+    return Array.from(map.entries())
+      .map(([productCategory, val]) => ({
+        productCategory,
+        emails: Array.from(new Set(val.emails)),
+        companies: val.companies
+      }))
+      .sort((a, b) => b.emails.length - a.emails.length);
+  }, [companies]);
+
+  // Available product categories for quick filtering pills
+  const availableProductCategories = useMemo(() => {
+    const list = productGroups.map(g => g.productCategory);
+    return ['All', ...list];
+  }, [productGroups]);
+
+  // Filtered companies based on search query, industry, and product category
   const filteredCompanies = useMemo(() => {
     return companies.filter(c => {
       const matchesIndustry = selectedIndustry === 'All' || c.industry === selectedIndustry;
       if (!matchesIndustry) return false;
+
+      const compProductCat = c.productCategory || c.subCategory || 'General Products & Services';
+      const matchesProduct = selectedProductCategory === 'All' || compProductCat === selectedProductCategory;
+      if (!matchesProduct) return false;
 
       if (!searchQuery.trim()) return true;
       const q = searchQuery.toLowerCase();
       return (
         c.companyName.toLowerCase().includes(q) ||
         c.domain.toLowerCase().includes(q) ||
+        (c.productCategory && c.productCategory.toLowerCase().includes(q)) ||
+        (c.primaryProducts && c.primaryProducts.some(p => p.toLowerCase().includes(q))) ||
         (c.subCategory && c.subCategory.toLowerCase().includes(q)) ||
+        (c.industry && c.industry.toLowerCase().includes(q)) ||
         (c.overview && c.overview.toLowerCase().includes(q)) ||
         c.emails.some(e => e.toLowerCase().includes(q))
       );
     });
-  }, [companies, selectedIndustry, searchQuery]);
+  }, [companies, selectedIndustry, selectedProductCategory, searchQuery]);
+
+  // Filtered product groups for the Products tab
+  const filteredProductGroups = useMemo(() => {
+    return productGroups.filter(pg => {
+      if (selectedProductCategory !== 'All' && pg.productCategory !== selectedProductCategory) {
+        return false;
+      }
+      if (!searchQuery.trim()) return true;
+      const q = searchQuery.toLowerCase();
+      return (
+        pg.productCategory.toLowerCase().includes(q) ||
+        pg.companies.some(c =>
+          c.companyName.toLowerCase().includes(q) ||
+          c.domain.toLowerCase().includes(q) ||
+          (c.primaryProducts && c.primaryProducts.some(p => p.toLowerCase().includes(q)))
+        ) ||
+        pg.emails.some(e => e.toLowerCase().includes(q))
+      );
+    });
+  }, [productGroups, selectedProductCategory, searchQuery]);
+
+  // Filtered industry groups for the Sectors tab
+  const filteredIndustryGroups = useMemo(() => {
+    return industryGroups.filter(ig => {
+      if (selectedIndustry !== 'All' && ig.industry !== selectedIndustry) {
+        return false;
+      }
+      if (!searchQuery.trim()) return true;
+      const q = searchQuery.toLowerCase();
+      return (
+        ig.industry.toLowerCase().includes(q) ||
+        ig.companies.some(c => c.companyName.toLowerCase().includes(q) || c.domain.toLowerCase().includes(q)) ||
+        ig.emails.some(e => e.toLowerCase().includes(q))
+      );
+    });
+  }, [industryGroups, selectedIndustry, searchQuery]);
 
   // Total email count across all analyzed companies
   const totalEmailsCount = useMemo(() => {
     return companies.reduce((acc, c) => acc + c.emails.length, 0);
   }, [companies]);
+
+  // Copy emails helper with visual feedback
+  const handleCopyEmails = (emailsList: string[], id: string, label: string) => {
+    if (emailsList.length === 0) return;
+    navigator.clipboard.writeText(emailsList.join('\n'));
+    setCopiedId(id);
+    setTimeout(() => setCopiedId(null), 2200);
+    showToast(`Copied ${emailsList.length} emails from ${label} to clipboard!`);
+  };
 
   // Main Processing Engine
   const processEmails = async () => {
@@ -292,10 +404,11 @@ const EmailAnalyzer: React.FC<EmailAnalyzerProps> = ({ showToast }) => {
         const batchDomains = uniqueDomains.slice(i, i + BATCH_SIZE);
         const currentDomainIndex = Math.min(i + BATCH_SIZE, totalDomains);
         setProgress({ current: currentDomainIndex, total: totalDomains });
-        setStatusText(`Scraping meta & search intelligence for ${batchDomains.slice(0, 3).join(', ')}...`);
+        setStatusText(`Extracting live website & Google search intelligence for ${batchDomains.slice(0, 3).join(', ')}...`);
 
         try {
-          const enrichedBatch = await fetchDomainIntelligence(batchDomains);
+          const apiKey = localStorage.getItem('gemini_api_key') || '';
+          const enrichedBatch = await fetchDomainIntelligence(batchDomains, apiKey);
 
           // Attach emails to enriched company objects
           const enrichedWithEmails: CompanyIntel[] = enrichedBatch.map(item => ({
@@ -341,7 +454,7 @@ const EmailAnalyzer: React.FC<EmailAnalyzerProps> = ({ showToast }) => {
     }
   };
 
-  // Export to Excel (.xlsx) with 2 detailed sheets
+  // Export to Excel (.xlsx) with 4 comprehensive sheets
   const handleExportExcel = () => {
     if (companies.length === 0) return;
 
@@ -353,6 +466,8 @@ const EmailAnalyzer: React.FC<EmailAnalyzerProps> = ({ showToast }) => {
       const companyData = companies.map(c => ({
         'Company Name': c.companyName,
         'Domain': c.domain,
+        'Product Category': c.productCategory || c.subCategory || 'General Products & Services',
+        'Primary Products / Services': (c.primaryProducts || []).join(', ') || 'N/A',
         'Primary Industry': c.industry,
         'Sub-Category / Niche': c.subCategory || 'N/A',
         'Company Overview': c.overview,
@@ -362,9 +477,6 @@ const EmailAnalyzer: React.FC<EmailAnalyzerProps> = ({ showToast }) => {
         'Website URL': c.websiteUrl || `https://${c.domain}`,
         'Confidence Score (%)': c.confidenceScore || 90,
         'AI Grounded': c.isAiEnhanced ? 'Yes' : 'Direct Web Meta',
-        'Page Title (<title>)': c.title || '',
-        'Meta Description': c.metaDescription || '',
-        'Search Engine Snippet': c.searchSnippet || '',
         'Total Discovered Emails': c.emails.length,
         'Email Addresses': c.emails.join(', ')
       }));
@@ -372,25 +484,42 @@ const EmailAnalyzer: React.FC<EmailAnalyzerProps> = ({ showToast }) => {
       const sheet1 = XLSX.utils.json_to_sheet(companyData);
       XLSX.utils.book_append_sheet(workbook, sheet1, 'Company Intelligence');
 
-      // Sheet 2: Industry Breakdown Summary
-      const summaryMap = new Map<string, { count: number; emails: number }>();
-      companies.forEach(c => {
-        const ind = c.industry || 'General Business';
-        const curr = summaryMap.get(ind) || { count: 0, emails: 0 };
-        curr.count += 1;
-        curr.emails += c.emails.length;
-        summaryMap.set(ind, curr);
-      });
-
-      const summaryData = Array.from(summaryMap.entries()).map(([industry, stats]) => ({
-        'Industry Sector': industry,
-        'Unique Companies': stats.count,
-        'Total Corporate Emails': stats.emails,
-        'Email Share (%)': `${Math.round((stats.emails / totalEmailsCount) * 100)}%`
+      // Sheet 2: Emails Categorized by Product / Service Category
+      const productSheetData = productGroups.map(pg => ({
+        'Product / Service Category': pg.productCategory,
+        'Unique Companies': pg.companies.length,
+        'Total Corporate Emails': pg.emails.length,
+        'Email Share (%)': `${Math.round((pg.emails.length / totalEmailsCount) * 100)}%`,
+        'Companies in Category': pg.companies.map(c => c.companyName).join(', '),
+        'Discovered Products Sample': Array.from(new Set(pg.companies.flatMap(c => c.primaryProducts || []))).slice(0, 8).join(', ') || 'N/A',
+        'All Emails in Category': pg.emails.join(', ')
       }));
+      const sheet2 = XLSX.utils.json_to_sheet(productSheetData);
+      XLSX.utils.book_append_sheet(workbook, sheet2, 'Emails by Product Category');
 
-      const sheet2 = XLSX.utils.json_to_sheet(summaryData);
-      XLSX.utils.book_append_sheet(workbook, sheet2, 'Industry Distribution');
+      // Sheet 3: Industry Breakdown Summary
+      const summaryData = industryGroups.map(ig => ({
+        'Industry Sector': ig.industry,
+        'Unique Companies': ig.companies.length,
+        'Total Corporate Emails': ig.emails.length,
+        'Email Share (%)': `${Math.round((ig.emails.length / totalEmailsCount) * 100)}%`
+      }));
+      const sheet3 = XLSX.utils.json_to_sheet(summaryData);
+      XLSX.utils.book_append_sheet(workbook, sheet3, 'Industry Distribution');
+
+      // Sheet 4: Clean Master Email List
+      const allEmailsList = Array.from(new Set<string>(companies.flatMap(c => c.emails))).map((email: string) => {
+        const matchingComp = companies.find(c => c.emails.includes(email));
+        return {
+          'Email Address': email,
+          'Domain': email.split('@')[1] || '',
+          'Company Name': matchingComp?.companyName || '',
+          'Product Category': matchingComp?.productCategory || matchingComp?.subCategory || 'General',
+          'Industry': matchingComp?.industry || ''
+        };
+      });
+      const sheet4 = XLSX.utils.json_to_sheet(allEmailsList);
+      XLSX.utils.book_append_sheet(workbook, sheet4, 'All Emails Master List');
 
       XLSX.writeFile(workbook, `Company_Intelligence_${dateStr}.xlsx`);
       showToast("Exported Company Intelligence as Excel Workbook!");
@@ -407,6 +536,8 @@ const EmailAnalyzer: React.FC<EmailAnalyzerProps> = ({ showToast }) => {
     const headers = [
       'Company Name',
       'Domain',
+      'Product Category',
+      'Primary Products',
       'Industry',
       'Sub-Category',
       'Overview',
@@ -421,6 +552,8 @@ const EmailAnalyzer: React.FC<EmailAnalyzerProps> = ({ showToast }) => {
     const rows = companies.map(c => [
       `"${(c.companyName || '').replace(/"/g, '""')}"`,
       `"${c.domain}"`,
+      `"${(c.productCategory || c.subCategory || '').replace(/"/g, '""')}"`,
+      `"${((c.primaryProducts || []).join('; ')).replace(/"/g, '""')}"`,
       `"${(c.industry || '').replace(/"/g, '""')}"`,
       `"${(c.subCategory || '').replace(/"/g, '""')}"`,
       `"${(c.overview || '').replace(/"/g, '""')}"`,
@@ -435,17 +568,144 @@ const EmailAnalyzer: React.FC<EmailAnalyzerProps> = ({ showToast }) => {
     const csvContent = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     downloadBlob(blob, `Company_Intelligence_${dateStr}.csv`);
-    showToast("Exported CSV file!");
+    showToast("Exported CSV file with product categories!");
   };
 
-  // Export to ZIP (.zip)
+  // Export all unique emails as plain text (.txt)
+  const handleExportAllEmailsTxt = () => {
+    const allEmails = Array.from(new Set<string>(companies.flatMap(c => c.emails)));
+    if (allEmails.length === 0) return;
+    const dateStr = new Date().toISOString().split('T')[0];
+    const blob = new Blob([allEmails.join('\n')], { type: 'text/plain;charset=utf-8;' });
+    downloadBlob(blob, `All_Corporate_Emails_${dateStr}.txt`);
+    showToast(`Exported ${allEmails.length} unique emails as text file!`);
+  };
+
+  // Single Company Export (TXT or CSV)
+  const handleExportSingleCompany = (company: CompanyIntel, format: 'txt' | 'csv') => {
+    const safeName = company.companyName.replace(/[^a-z0-9]/gi, '_');
+    if (format === 'txt') {
+      const textLines = [
+        `=============================================================`,
+        `COMPANY: ${company.companyName.toUpperCase()} (${company.domain})`,
+        `Product Category: ${company.productCategory || 'General Products & Services'}`,
+        company.primaryProducts?.length ? `Primary Products: ${company.primaryProducts.join(', ')}` : '',
+        `Industry: ${company.industry}${company.subCategory ? ` - ${company.subCategory}` : ''}`,
+        `Overview: ${company.overview}`,
+        `Business Model: ${company.businessModel || 'B2B'} | HQ: ${company.headquarters || 'Global'}`,
+        `Website: ${company.websiteUrl || `https://${company.domain}`} [${company.websiteStatus}]`,
+        `=============================================================`,
+        `\n--- DISCOVERED EMAILS (${company.emails.length}) ---`,
+        ...company.emails
+      ].filter(Boolean);
+      downloadBlob(new Blob([textLines.join('\n')], { type: 'text/plain;charset=utf-8;' }), `${safeName}_emails.txt`);
+      showToast(`Exported emails for ${company.companyName}!`);
+    } else {
+      const headers = ['Company Name', 'Domain', 'Product Category', 'Primary Products', 'Industry', 'Overview', 'Email'];
+      const prodStr = (company.primaryProducts || []).join('; ');
+      const rows = company.emails.map(email => [
+        `"${company.companyName.replace(/"/g, '""')}"`,
+        `"${company.domain}"`,
+        `"${(company.productCategory || '').replace(/"/g, '""')}"`,
+        `"${prodStr.replace(/"/g, '""')}"`,
+        `"${company.industry}"`,
+        `"${company.overview.replace(/"/g, '""')}"`,
+        `"${email}"`
+      ].join(','));
+      const csvContent = [headers.join(','), ...rows].join('\n');
+      downloadBlob(new Blob([csvContent], { type: 'text/csv;charset=utf-8;' }), `${safeName}_contacts.csv`);
+      showToast(`Exported CSV for ${company.companyName}!`);
+    }
+  };
+
+  // Single Product Category Export (TXT or CSV)
+  const handleExportSingleProduct = (group: ProductGroupIntel, format: 'txt' | 'csv') => {
+    const safeName = group.productCategory.replace(/[^a-z0-9]/gi, '_').substring(0, 45);
+    if (format === 'txt') {
+      const lines = [
+        `=============================================================`,
+        `PRODUCT CATEGORY: ${group.productCategory.toUpperCase()}`,
+        `Total Companies: ${group.companies.length} | Total Emails: ${group.emails.length}`,
+        `Exported: ${new Date().toLocaleString()}`,
+        `=============================================================\n`,
+        `--- ALL EMAILS (${group.emails.length}) ---`,
+        ...group.emails,
+        `\n--- COMPANIES IN THIS CATEGORY (${group.companies.length}) ---`,
+        ...group.companies.map(c => `• ${c.companyName} (${c.domain}) - Products: ${(c.primaryProducts || []).join(', ') || c.subCategory || 'N/A'}`)
+      ];
+      downloadBlob(new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8;' }), `${safeName}_emails.txt`);
+      showToast(`Exported ${group.emails.length} emails for ${group.productCategory}!`);
+    } else {
+      const headers = ['Product Category', 'Company Name', 'Domain', 'Industry', 'Primary Products', 'Email', 'Overview'];
+      const rows: string[] = [];
+      group.companies.forEach(c => {
+        const prodStr = (c.primaryProducts || []).join('; ');
+        c.emails.forEach(email => {
+          rows.push([
+            `"${group.productCategory.replace(/"/g, '""')}"`,
+            `"${c.companyName.replace(/"/g, '""')}"`,
+            `"${c.domain}"`,
+            `"${c.industry}"`,
+            `"${prodStr.replace(/"/g, '""')}"`,
+            `"${email}"`,
+            `"${c.overview.replace(/"/g, '""')}"`
+          ].join(','));
+        });
+      });
+      const csvContent = [headers.join(','), ...rows].join('\n');
+      downloadBlob(new Blob([csvContent], { type: 'text/csv;charset=utf-8;' }), `${safeName}_contacts.csv`);
+      showToast(`Exported contacts CSV for ${group.productCategory}!`);
+    }
+  };
+
+  // Single Industry Sector Export (TXT or CSV)
+  const handleExportSingleIndustry = (group: IndustryGroupIntel, format: 'txt' | 'csv') => {
+    const safeName = group.industry.replace(/[^a-z0-9]/gi, '_');
+    if (format === 'txt') {
+      const lines = [
+        `=============================================================`,
+        `INDUSTRY SECTOR: ${group.industry.toUpperCase()}`,
+        `Total Companies: ${group.companies.length} | Total Emails: ${group.emails.length}`,
+        `Exported: ${new Date().toLocaleString()}`,
+        `=============================================================\n`,
+        `--- ALL EMAILS (${group.emails.length}) ---`,
+        ...group.emails,
+        `\n--- COMPANIES IN THIS SECTOR ---`,
+        ...group.companies.map(c => `• ${c.companyName} (${c.domain}) - ${c.productCategory || c.subCategory || ''}`)
+      ];
+      downloadBlob(new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8;' }), `${safeName}_emails.txt`);
+      showToast(`Exported emails for ${group.industry}!`);
+    } else {
+      const headers = ['Industry', 'Company Name', 'Domain', 'Product Category', 'Primary Products', 'Email'];
+      const rows: string[] = [];
+      group.companies.forEach(c => {
+        const prodStr = (c.primaryProducts || []).join('; ');
+        c.emails.forEach(email => {
+          rows.push([
+            `"${group.industry}"`,
+            `"${c.companyName.replace(/"/g, '""')}"`,
+            `"${c.domain}"`,
+            `"${(c.productCategory || '').replace(/"/g, '""')}"`,
+            `"${prodStr.replace(/"/g, '""')}"`,
+            `"${email}"`
+          ].join(','));
+        });
+      });
+      const csvContent = [headers.join(','), ...rows].join('\n');
+      downloadBlob(new Blob([csvContent], { type: 'text/csv;charset=utf-8;' }), `${safeName}_industry_contacts.csv`);
+      showToast(`Exported CSV for ${group.industry}!`);
+    }
+  };
+
+  // Comprehensive Export to ZIP (.zip) with Product Categories & Single Companies
   const handleExportZip = async () => {
     if (companies.length === 0) return;
 
     try {
+      showToast("Packaging ZIP archive with product categories...");
       const zip = new JSZip();
       const dateStr = new Date().toISOString().split('T')[0];
-      const folderName = `Company_Intelligence_${dateStr}`;
+      const folderName = `Email_Intelligence_By_Product_${dateStr}`;
       const folder = zip.folder(folderName);
 
       if (!folder) {
@@ -453,37 +713,108 @@ const EmailAnalyzer: React.FC<EmailAnalyzerProps> = ({ showToast }) => {
         return;
       }
 
-      // Export file for each industry sector
-      industryGroups.forEach(group => {
-        const safeIndustry = group.industry.replace(/[^a-z0-9]/gi, '_');
-        const lines: string[] = [
-          `=============================================================`,
-          `INDUSTRY SECTOR: ${group.industry.toUpperCase()}`,
-          `Total Companies: ${group.companies.length} | Total Emails: ${group.emails.length}`,
-          `Generated: ${new Date().toLocaleString()}`,
-          `=============================================================\n`
-        ];
+      // 1. PRODUCT CATEGORIES DIRECTORY (Individual files per product category)
+      const prodFolder = folder.folder("1_Emails_By_Product_Category");
+      if (prodFolder) {
+        productGroups.forEach(group => {
+          const safeName = group.productCategory.replace(/[^a-z0-9]/gi, '_').substring(0, 50);
+          
+          // Pure clean emails list file
+          const emailList = group.emails.join('\n');
+          prodFolder.file(`${safeName}_emails.txt`, emailList);
 
-        group.companies.forEach((comp, idx) => {
-          lines.push(`[${idx + 1}] ${comp.companyName.toUpperCase()} (${comp.domain})`);
-          if (comp.subCategory) lines.push(`Niche: ${comp.subCategory}`);
-          if (comp.businessModel) lines.push(`Model: ${comp.businessModel} | HQ: ${comp.headquarters || 'Global'}`);
-          lines.push(`Confidence: ${comp.confidenceScore || 90}% [${comp.websiteStatus}]`);
-          lines.push(`Website: ${comp.websiteUrl || `https://${comp.domain}`}`);
-          lines.push(`Overview: ${comp.overview}`);
-          if (comp.title) lines.push(`Title: ${comp.title}`);
-          if (comp.metaDescription) lines.push(`Meta: ${comp.metaDescription}`);
-          if (comp.searchSnippet) lines.push(`Search Index: ${comp.searchSnippet}`);
-          lines.push(`Emails (${comp.emails.length}):\n${comp.emails.join('\n')}`);
-          lines.push(`-------------------------------------------------------------\n`);
+          // Detailed contacts CSV file for category
+          const csvHeaders = ['Product Category', 'Company Name', 'Domain', 'Industry', 'Primary Products', 'Email'];
+          const csvRows: string[] = [];
+          group.companies.forEach(c => {
+            const prods = (c.primaryProducts || []).join('; ');
+            c.emails.forEach(email => {
+              csvRows.push([
+                `"${group.productCategory.replace(/"/g, '""')}"`,
+                `"${c.companyName.replace(/"/g, '""')}"`,
+                `"${c.domain}"`,
+                `"${c.industry}"`,
+                `"${prods.replace(/"/g, '""')}"`,
+                `"${email}"`
+              ].join(','));
+            });
+          });
+          prodFolder.file(`${safeName}_contacts.csv`, [csvHeaders.join(','), ...csvRows].join('\n'));
         });
+      }
 
-        folder.file(`${safeIndustry}_companies.txt`, lines.join('\n'));
-      });
+      // 2. SINGLE COMPANIES DIRECTORY (Individual file per company)
+      const compFolder = folder.folder("2_Emails_By_Company");
+      if (compFolder) {
+        companies.forEach(c => {
+          const safeComp = c.companyName.replace(/[^a-z0-9]/gi, '_').substring(0, 45);
+          const cLines = [
+            `# Company: ${c.companyName} (${c.domain})`,
+            `# Product Category: ${c.productCategory || 'General'}`,
+            c.primaryProducts?.length ? `# Primary Products: ${c.primaryProducts.join(', ')}` : '',
+            `# Industry: ${c.industry}`,
+            `# Total Emails: ${c.emails.length}`,
+            `# ----------------------------------------------------`,
+            ...c.emails
+          ].filter(Boolean);
+          compFolder.file(`${safeComp}_emails.txt`, cLines.join('\n'));
+        });
+      }
+
+      // 3. INDUSTRY SECTORS DIRECTORY
+      const indFolder = folder.folder("3_Emails_By_Industry_Sector");
+      if (indFolder) {
+        industryGroups.forEach(group => {
+          const safeIndustry = group.industry.replace(/[^a-z0-9]/gi, '_');
+          const lines: string[] = [
+            `# INDUSTRY SECTOR: ${group.industry.toUpperCase()}`,
+            `# Total Companies: ${group.companies.length} | Total Emails: ${group.emails.length}`,
+            ...group.emails
+          ];
+          indFolder.file(`${safeIndustry}_emails.txt`, lines.join('\n'));
+        });
+      }
+
+      // 4. ROOT MASTER FILES
+      const allUniqueEmails = Array.from(new Set<string>(companies.flatMap(c => c.emails)));
+      folder.file(`ALL_EMAILS_CLEAN_LIST.txt`, allUniqueEmails.join('\n'));
+
+      // Root CSV
+      const masterCsvHeaders = [
+        'Company Name',
+        'Domain',
+        'Product Category',
+        'Primary Products',
+        'Industry',
+        'Sub-Category',
+        'Overview',
+        'Business Model',
+        'Headquarters',
+        'Website Status',
+        'Confidence Score',
+        'Total Emails',
+        'Emails'
+      ];
+      const masterCsvRows = companies.map(c => [
+        `"${(c.companyName || '').replace(/"/g, '""')}"`,
+        `"${c.domain}"`,
+        `"${(c.productCategory || c.subCategory || '').replace(/"/g, '""')}"`,
+        `"${((c.primaryProducts || []).join('; ')).replace(/"/g, '""')}"`,
+        `"${(c.industry || '').replace(/"/g, '""')}"`,
+        `"${(c.subCategory || '').replace(/"/g, '""')}"`,
+        `"${(c.overview || '').replace(/"/g, '""')}"`,
+        `"${(c.businessModel || '').replace(/"/g, '""')}"`,
+        `"${(c.headquarters || '').replace(/"/g, '""')}"`,
+        `"${c.websiteStatus}"`,
+        `"${c.confidenceScore || 90}%"`,
+        c.emails.length,
+        `"${c.emails.join('; ').replace(/"/g, '""')}"`
+      ]);
+      folder.file(`ALL_COMPANIES_INTELLIGENCE.csv`, [masterCsvHeaders.join(','), ...masterCsvRows.map(r => r.join(','))].join('\n'));
 
       const content = await zip.generateAsync({ type: "blob" });
       downloadBlob(content, `${folderName}.zip`);
-      showToast("Downloaded all industry intelligence as ZIP!");
+      showToast("Downloaded all emails organized by product category as ZIP!");
     } catch (e) {
       console.error("Zip generation failed", e);
       showToast("Failed to generate ZIP file.");
@@ -679,7 +1010,7 @@ const EmailAnalyzer: React.FC<EmailAnalyzerProps> = ({ showToast }) => {
               </div>
               <p className="text-xs text-gray-400 mt-0.5">
                 {companies.length > 0
-                  ? `${totalEmailsCount} business emails organized into ${industryGroups.length} industry sectors`
+                  ? `${totalEmailsCount} business emails organized into ${productGroups.length} product categories & ${industryGroups.length} sectors`
                   : "Discover real company profiles, search snippets & meta tags"}
               </p>
             </div>
@@ -687,35 +1018,49 @@ const EmailAnalyzer: React.FC<EmailAnalyzerProps> = ({ showToast }) => {
             {/* VIEW MODE & EXPORTS */}
             {companies.length > 0 && (
               <div className="flex items-center gap-2 flex-wrap">
-                {/* View Switcher */}
+                {/* View Switcher: Companies | Products | Sectors */}
                 <div className="flex bg-gray-800 p-0.5 rounded-lg border border-gray-700 text-xs">
                   <button
                     onClick={() => setViewMode('companies')}
-                    className={`px-3 py-1.5 rounded-md font-medium transition ${
+                    className={`px-3 py-1.5 rounded-md font-medium transition flex items-center gap-1.5 ${
                       viewMode === 'companies'
                         ? 'bg-purple-600 text-white shadow'
                         : 'text-gray-400 hover:text-white'
                     }`}
                   >
-                    Companies ({companies.length})
+                    <span>Companies</span>
+                    <span className="text-[10px] opacity-80 font-mono">({companies.length})</span>
+                  </button>
+                  <button
+                    onClick={() => setViewMode('products')}
+                    className={`px-3 py-1.5 rounded-md font-medium transition flex items-center gap-1.5 ${
+                      viewMode === 'products'
+                        ? 'bg-purple-600 text-white shadow'
+                        : 'text-gray-400 hover:text-white'
+                    }`}
+                  >
+                    <TagIcon className="w-3.5 h-3.5 text-pink-300" />
+                    <span>Products</span>
+                    <span className="text-[10px] opacity-80 font-mono">({productGroups.length})</span>
                   </button>
                   <button
                     onClick={() => setViewMode('industries')}
-                    className={`px-3 py-1.5 rounded-md font-medium transition ${
+                    className={`px-3 py-1.5 rounded-md font-medium transition flex items-center gap-1.5 ${
                       viewMode === 'industries'
                         ? 'bg-purple-600 text-white shadow'
                         : 'text-gray-400 hover:text-white'
                     }`}
                   >
-                    Sectors ({industryGroups.length})
+                    <span>Sectors</span>
+                    <span className="text-[10px] opacity-80 font-mono">({industryGroups.length})</span>
                   </button>
                 </div>
 
-                {/* Export Excel */}
+                {/* Export Excel (Multi-sheet with Product Categories) */}
                 <button
                   onClick={handleExportExcel}
                   className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white transition shadow"
-                  title="Export detailed Excel sheet with all metadata"
+                  title="Export 4-sheet Excel workbook with dossiers, product categories, and email catalog"
                 >
                   <DocumentArrowUpIcon className="w-3.5 h-3.5" /> Excel (.xlsx)
                 </button>
@@ -723,19 +1068,28 @@ const EmailAnalyzer: React.FC<EmailAnalyzerProps> = ({ showToast }) => {
                 {/* Export CSV */}
                 <button
                   onClick={handleExportCsv}
-                  className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg bg-gray-700 hover:bg-gray-600 text-gray-200 transition border border-gray-600"
-                  title="Export standard CSV"
+                  className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium rounded-lg bg-gray-700 hover:bg-gray-600 text-gray-200 transition border border-gray-600"
+                  title="Export CSV with product categories and primary products"
                 >
-                  CSV
+                  <ArrowDownTrayIcon className="w-3.5 h-3.5" /> CSV
                 </button>
 
-                {/* Export ZIP */}
+                {/* Export All Emails Plain Text */}
+                <button
+                  onClick={handleExportAllEmailsTxt}
+                  className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium rounded-lg bg-gray-700 hover:bg-gray-600 text-gray-200 transition border border-gray-600"
+                  title="Export all unique emails in plain text"
+                >
+                  <ClipboardIcon className="w-3.5 h-3.5" /> TXT
+                </button>
+
+                {/* Export ZIP by Product & Sector */}
                 <button
                   onClick={handleExportZip}
-                  className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg bg-gray-700 hover:bg-gray-600 text-gray-200 transition border border-gray-600"
-                  title="Export text archives by sector"
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-indigo-700 hover:bg-indigo-600 text-white transition border border-indigo-500 shadow"
+                  title="Download packaged ZIP categorized into product categories, single companies, and sectors"
                 >
-                  <FolderOpenIcon className="w-3.5 h-3.5" /> ZIP
+                  <FolderOpenIcon className="w-3.5 h-3.5" /> ZIP Archive
                 </button>
               </div>
             )}
@@ -743,35 +1097,95 @@ const EmailAnalyzer: React.FC<EmailAnalyzerProps> = ({ showToast }) => {
 
           {/* FILTERING & SEARCH BAR */}
           {companies.length > 0 && (
-            <div className="p-3 bg-gray-900/30 border-b border-gray-700/40 flex flex-wrap items-center gap-3">
-              {/* Search Bar */}
-              <div className="relative flex-1 min-w-[200px]">
-                <MagnifyingGlassIcon className="w-4 h-4 text-gray-400 absolute left-3 top-2.5" />
-                <input
-                  type="text"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Search company, domain, industry, or email..."
-                  className="w-full pl-9 pr-3 py-1.5 bg-gray-800/80 border border-gray-700 rounded-lg text-xs text-gray-200 focus:outline-none focus:ring-1 focus:ring-purple-500"
-                />
+            <div className="p-3 bg-gray-900/30 border-b border-gray-700/40 flex flex-col gap-2.5">
+              <div className="flex flex-wrap items-center gap-3">
+                {/* Search Bar */}
+                <div className="relative flex-1 min-w-[200px]">
+                  <MagnifyingGlassIcon className="w-4 h-4 text-gray-400 absolute left-3 top-2.5" />
+                  <input
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder="Search company, domain, product category, product name, or email..."
+                    className="w-full pl-9 pr-3 py-1.5 bg-gray-800/80 border border-gray-700 rounded-lg text-xs text-gray-200 focus:outline-none focus:ring-1 focus:ring-purple-500"
+                  />
+                </div>
+
+                {/* Quick Filters for Companies View */}
+                {viewMode === 'companies' && (
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={selectedProductCategory}
+                      onChange={(e) => setSelectedProductCategory(e.target.value)}
+                      className="bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-purple-300 font-medium focus:ring-1 focus:ring-purple-500 focus:outline-none"
+                    >
+                      <option value="All">All Product Categories ({productGroups.length})</option>
+                      {productGroups.map(pg => (
+                        <option key={pg.productCategory} value={pg.productCategory}>
+                          {pg.productCategory} ({pg.companies.length})
+                        </option>
+                      ))}
+                    </select>
+
+                    <select
+                      value={selectedIndustry}
+                      onChange={(e) => setSelectedIndustry(e.target.value)}
+                      className="bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-gray-300 focus:ring-1 focus:ring-purple-500 focus:outline-none"
+                    >
+                      <option value="All">All Industry Sectors ({industryGroups.length})</option>
+                      {industryGroups.map(ig => (
+                        <option key={ig.industry} value={ig.industry}>
+                          {ig.industry} ({ig.companies.length})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
               </div>
 
-              {/* Industry Pills */}
-              <div className="flex items-center gap-1.5 overflow-x-auto custom-scrollbar max-w-full pb-1">
-                {availableIndustries.map(ind => (
-                  <button
-                    key={ind}
-                    onClick={() => setSelectedIndustry(ind)}
-                    className={`px-2.5 py-1 rounded-full text-xs font-medium whitespace-nowrap transition ${
-                      selectedIndustry === ind
-                        ? 'bg-purple-600 text-white shadow'
-                        : 'bg-gray-800/70 text-gray-400 hover:text-gray-200 hover:bg-gray-700/60'
-                    }`}
-                  >
-                    {ind}
-                  </button>
-                ))}
-              </div>
+              {/* Quick Pills for Products View */}
+              {viewMode === 'products' && (
+                <div className="flex items-center gap-1.5 overflow-x-auto custom-scrollbar max-w-full pb-1">
+                  <span className="text-[11px] text-gray-400 font-medium shrink-0 mr-1 flex items-center gap-1">
+                    <TagIcon className="w-3 h-3 text-pink-400" /> Products:
+                  </span>
+                  {availableProductCategories.map(cat => (
+                    <button
+                      key={cat}
+                      onClick={() => setSelectedProductCategory(cat)}
+                      className={`px-2.5 py-1 rounded-full text-xs font-medium whitespace-nowrap transition ${
+                        selectedProductCategory === cat
+                          ? 'bg-pink-600 text-white shadow'
+                          : 'bg-gray-800/70 text-gray-400 hover:text-gray-200 hover:bg-gray-700/60'
+                      }`}
+                    >
+                      {cat}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {/* Quick Pills for Sectors View */}
+              {viewMode === 'industries' && (
+                <div className="flex items-center gap-1.5 overflow-x-auto custom-scrollbar max-w-full pb-1">
+                  <span className="text-[11px] text-gray-400 font-medium shrink-0 mr-1 flex items-center gap-1">
+                    <BriefcaseIcon className="w-3 h-3 text-purple-400" /> Sectors:
+                  </span>
+                  {availableIndustries.map(ind => (
+                    <button
+                      key={ind}
+                      onClick={() => setSelectedIndustry(ind)}
+                      className={`px-2.5 py-1 rounded-full text-xs font-medium whitespace-nowrap transition ${
+                        selectedIndustry === ind
+                          ? 'bg-purple-600 text-white shadow'
+                          : 'bg-gray-800/70 text-gray-400 hover:text-gray-200 hover:bg-gray-700/60'
+                      }`}
+                    >
+                      {ind}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
@@ -782,7 +1196,7 @@ const EmailAnalyzer: React.FC<EmailAnalyzerProps> = ({ showToast }) => {
                 <BriefcaseIcon className="w-14 h-14 mb-3 text-purple-400/50 animate-pulse" />
                 <h3 className="text-base font-semibold text-gray-300">Ready to Analyze Corporate Domains</h3>
                 <p className="text-xs text-gray-400 max-w-md mt-1 leading-relaxed">
-                  Paste business email addresses or upload an Excel/CSV file to extract company names, live website meta tags, Google/search snippets, and accurate sector classification.
+                  Paste business email addresses or upload an Excel/CSV file to extract company names, live website meta tags, Google/search snippets, product categorization, and sector classification.
                 </p>
               </div>
             ) : viewMode === 'companies' ? (
@@ -831,16 +1245,19 @@ const EmailAnalyzer: React.FC<EmailAnalyzerProps> = ({ showToast }) => {
                       </div>
 
                       {/* BADGES ROW */}
-                      <div className="flex flex-wrap gap-1.5 mb-2.5">
+                      <div className="flex flex-wrap items-center gap-1.5 mb-2">
+                        {/* Product Category badge */}
+                        <span className="flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-semibold bg-pink-950/60 border border-pink-800/40 text-pink-300">
+                          <TagIcon className="w-3 h-3 text-pink-400" />
+                          {comp.productCategory || comp.subCategory || 'General Products & Services'}
+                        </span>
+
+                        {/* Industry Sector badge */}
                         <span className="flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-semibold bg-purple-950/60 border border-purple-800/40 text-purple-300">
                           {getIndustryIcon(comp.industry)}
                           {comp.industry}
                         </span>
-                        {comp.subCategory && (
-                          <span className="px-2 py-0.5 rounded-md text-[10px] font-medium bg-blue-950/60 border border-blue-800/40 text-blue-300 truncate max-w-[170px]">
-                            {comp.subCategory}
-                          </span>
-                        )}
+
                         {comp.businessModel && (
                           <span className="px-1.5 py-0.5 rounded-md text-[10px] font-medium bg-gray-700/60 text-gray-300">
                             {comp.businessModel}
@@ -854,40 +1271,117 @@ const EmailAnalyzer: React.FC<EmailAnalyzerProps> = ({ showToast }) => {
                         )}
                       </div>
 
+                      {/* PRIMARY PRODUCTS CHIPS */}
+                      {comp.primaryProducts && comp.primaryProducts.length > 0 && (
+                        <div className="flex flex-wrap gap-1 mb-2.5">
+                          {comp.primaryProducts.slice(0, 4).map((prod, idx) => (
+                            <span
+                              key={idx}
+                              className="px-2 py-0.5 rounded text-[10px] font-medium bg-gray-900 border border-gray-700 text-gray-300"
+                            >
+                              {prod}
+                            </span>
+                          ))}
+                          {comp.primaryProducts.length > 4 && (
+                            <span className="px-1.5 py-0.5 rounded text-[10px] text-gray-500 font-medium">
+                              +{comp.primaryProducts.length - 4} more
+                            </span>
+                          )}
+                        </div>
+                      )}
+
                       {/* OVERVIEW / WHAT THEY DO */}
                       <p className="text-gray-300 text-xs line-clamp-2 leading-relaxed mb-3">
                         {comp.overview}
                       </p>
 
-                      {/* SEARCH / META SNIPPET HIGHLIGHT */}
-                      {(comp.metaDescription || comp.searchSnippet) && (
+                      {/* SEARCH / META / WEBSITE SNIPPET HIGHLIGHT */}
+                      {(comp.searchSnippet || comp.websiteSnippet || comp.metaDescription) && (
                         <div className="bg-gray-900/60 border border-gray-700/50 rounded-lg p-2 text-[11px] text-gray-400 font-sans mb-3 line-clamp-2">
                           <span className="text-purple-400 font-semibold mr-1">
-                            {comp.metaDescription ? 'Meta Tag:' : 'Search Index:'}
+                            {comp.searchSnippet ? 'Google Snippet:' : comp.websiteSnippet ? 'Website Body:' : 'Meta Description:'}
                           </span>
-                          {comp.metaDescription || comp.searchSnippet}
+                          {comp.searchSnippet || comp.websiteSnippet || comp.metaDescription}
                         </div>
                       )}
                     </div>
 
                     {/* CARD FOOTER */}
-                    <div className="pt-2 border-t border-gray-700/50 flex items-center justify-between text-xs">
+                    <div className="pt-2.5 border-t border-gray-700/50 flex flex-wrap items-center justify-between gap-2 text-xs">
                       {/* Expandable Emails Button */}
-                      <button
-                        onClick={() => setExpandedEmailsDomain(expandedEmailsDomain === comp.domain ? null : comp.domain)}
-                        className="text-gray-400 hover:text-white flex items-center gap-1 text-[11px]"
-                      >
-                        <span className="font-semibold text-purple-300">{comp.emails.length}</span> emails
-                        <span className="text-[10px]">{expandedEmailsDomain === comp.domain ? '▲' : '▼'}</span>
-                      </button>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => setExpandedEmailsDomain(expandedEmailsDomain === comp.domain ? null : comp.domain)}
+                          className="text-gray-400 hover:text-white flex items-center gap-1 text-[11px]"
+                        >
+                          <span className="font-semibold text-purple-300">{comp.emails.length}</span> emails
+                          <span className="text-[10px]">{expandedEmailsDomain === comp.domain ? '▲' : '▼'}</span>
+                        </button>
 
-                      {/* View Full Dossier Button */}
-                      <button
-                        onClick={() => setSelectedCompanyForModal(comp)}
-                        className="px-2.5 py-1 bg-gray-700 hover:bg-purple-600 text-gray-200 hover:text-white rounded-lg text-xs font-medium transition flex items-center gap-1"
-                      >
-                        View Dossier
-                      </button>
+                        {/* Copy emails button */}
+                        <button
+                          onClick={() => handleCopyEmails(comp.emails, comp.domain, comp.companyName)}
+                          className="text-gray-400 hover:text-purple-300 flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded hover:bg-gray-700/50 transition"
+                          title="Copy all emails for this company"
+                        >
+                          {copiedId === comp.domain ? (
+                            <>
+                              <CheckIcon className="w-3 h-3 text-emerald-400" />
+                              <span className="text-emerald-400">Copied</span>
+                            </>
+                          ) : (
+                            <>
+                              <ClipboardIcon className="w-3 h-3" />
+                              <span>Copy</span>
+                            </>
+                          )}
+                        </button>
+
+                        {/* Single Export Dropdown / Buttons */}
+                        <button
+                          onClick={() => handleExportSingleCompany(comp, 'txt')}
+                          className="text-gray-400 hover:text-gray-200 text-[11px] px-1.5 py-0.5 rounded hover:bg-gray-700/50 transition flex items-center gap-0.5"
+                          title="Export single company emails as TXT"
+                        >
+                          <ArrowDownTrayIcon className="w-3 h-3" />
+                          TXT
+                        </button>
+                      </div>
+
+                      {/* Actions: Google External + Re-query + View Full Dossier */}
+                      <div className="flex items-center gap-1.5">
+                        <a
+                          href={`https://www.google.com/search?q=${encodeURIComponent(comp.companyName + ' ' + comp.domain)}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="px-2 py-1 bg-gray-800 hover:bg-gray-700 text-gray-300 hover:text-white rounded-lg text-xs font-medium transition flex items-center gap-1 border border-gray-700"
+                          title="Verify directly on Google Search"
+                        >
+                          Google
+                          <LinkIcon className="w-3 h-3 opacity-60" />
+                        </a>
+
+                        <button
+                          onClick={() => handleRequeryCompany(comp)}
+                          disabled={refreshingDomain === comp.domain}
+                          className="px-2 py-1 bg-gray-800 hover:bg-purple-900/50 text-gray-300 hover:text-purple-300 rounded-lg text-xs font-medium transition flex items-center gap-1 border border-gray-700 disabled:opacity-50"
+                          title="Re-scrape live website and Google search grounding"
+                        >
+                          {refreshingDomain === comp.domain ? (
+                            <ArrowPathIcon className="w-3.5 h-3.5 animate-spin text-purple-400" />
+                          ) : (
+                            <ArrowPathIcon className="w-3.5 h-3.5" />
+                          )}
+                          Re-check
+                        </button>
+
+                        <button
+                          onClick={() => setSelectedCompanyForModal(comp)}
+                          className="px-2.5 py-1 bg-gray-700 hover:bg-purple-600 text-gray-200 hover:text-white rounded-lg text-xs font-medium transition flex items-center gap-1"
+                        >
+                          View Dossier
+                        </button>
+                      </div>
                     </div>
 
                     {/* EXPANDED EMAILS PREVIEW */}
@@ -903,54 +1397,236 @@ const EmailAnalyzer: React.FC<EmailAnalyzerProps> = ({ showToast }) => {
                   </div>
                 ))}
               </div>
-            ) : (
-              /* --- VIEW 2: INDUSTRY SECTOR GROUPS --- */
+            ) : viewMode === 'products' ? (
+              /* --- VIEW 2: PRODUCT & SERVICE CATEGORY GROUPS --- */
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {industryGroups.map((group) => (
+                {filteredProductGroups.map((group) => {
+                  const uniqueProductsSample = Array.from(
+                    new Set(group.companies.flatMap(c => c.primaryProducts || []))
+                  ).slice(0, 6);
+
+                  return (
+                    <div
+                      key={group.productCategory}
+                      className="bg-gray-800/50 border border-gray-700 rounded-xl p-4 hover:border-pink-500/50 transition-all flex flex-col justify-between"
+                    >
+                      <div>
+                        {/* CATEGORY HEADER & SINGLE EXPORT BUTTONS */}
+                        <div className="flex items-start justify-between gap-2 mb-3">
+                          <div className="flex items-center gap-2.5">
+                            <div className="bg-pink-950/70 border border-pink-800/50 p-2 rounded-lg text-pink-300">
+                              <TagIcon className="w-5 h-5" />
+                            </div>
+                            <div>
+                              <h3 className="font-bold text-white text-sm tracking-tight">{group.productCategory}</h3>
+                              <span className="text-xs text-gray-400">
+                                {group.companies.length} {group.companies.length === 1 ? 'company' : 'companies'} •{' '}
+                                <span className="text-pink-300 font-semibold">{group.emails.length}</span> emails
+                              </span>
+                            </div>
+                          </div>
+
+                          {/* Quick single export buttons */}
+                          <div className="flex items-center gap-1">
+                            <button
+                              onClick={() => handleCopyEmails(group.emails, `prod-${group.productCategory}`, group.productCategory)}
+                              className="px-2 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-200 text-xs font-medium transition flex items-center gap-1"
+                              title="Copy all emails in this product category"
+                            >
+                              {copiedId === `prod-${group.productCategory}` ? (
+                                <>
+                                  <CheckIcon className="w-3.5 h-3.5 text-emerald-400" />
+                                  <span className="text-emerald-400">Copied</span>
+                                </>
+                              ) : (
+                                <>
+                                  <ClipboardIcon className="w-3.5 h-3.5" />
+                                  <span>Copy</span>
+                                </>
+                              )}
+                            </button>
+
+                            <button
+                              onClick={() => handleExportSingleProduct(group, 'txt')}
+                              className="px-2 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-200 text-xs font-medium transition flex items-center gap-1"
+                              title="Export emails in this product category as TXT"
+                            >
+                              <ArrowDownTrayIcon className="w-3.5 h-3.5" />
+                              <span>TXT</span>
+                            </button>
+
+                            <button
+                              onClick={() => handleExportSingleProduct(group, 'csv')}
+                              className="px-2 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-200 text-xs font-medium transition flex items-center gap-1"
+                              title="Export contacts in this product category as CSV"
+                            >
+                              <ArrowDownTrayIcon className="w-3.5 h-3.5" />
+                              <span>CSV</span>
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* DISCOVERED PRIMARY PRODUCTS SAMPLE */}
+                        {uniqueProductsSample.length > 0 && (
+                          <div className="mb-3">
+                            <div className="text-[11px] font-medium text-gray-400 mb-1">Key Products & Offerings:</div>
+                            <div className="flex flex-wrap gap-1">
+                              {uniqueProductsSample.map((p, idx) => (
+                                <span
+                                  key={idx}
+                                  className="px-2 py-0.5 rounded text-[10px] font-medium bg-gray-900 border border-gray-700/80 text-gray-300"
+                                >
+                                  {p}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* COMPANIES LIST IN THIS PRODUCT CATEGORY */}
+                        <div className="space-y-1.5 mb-3 max-h-36 overflow-y-auto custom-scrollbar pr-1">
+                          {group.companies.map(c => (
+                            <div
+                              key={c.domain}
+                              onClick={() => setSelectedCompanyForModal(c)}
+                              className="flex items-center justify-between p-1.5 bg-gray-900/40 hover:bg-gray-900/80 rounded-lg cursor-pointer border border-transparent hover:border-pink-500/30 transition text-xs"
+                            >
+                              <div className="flex items-center gap-2 truncate">
+                                <span className="font-medium text-gray-200 truncate">{c.companyName}</span>
+                                <span className="text-[10px] text-gray-500 font-mono">({c.domain})</span>
+                              </div>
+                              <div className="flex items-center gap-2 shrink-0 ml-2">
+                                <span className="text-[10px] text-gray-400">
+                                  {c.industry}
+                                </span>
+                                <span className="text-[10px] text-pink-300 font-mono">
+                                  {c.emails.length} {c.emails.length === 1 ? 'email' : 'emails'}
+                                </span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* EMAILS PREVIEW BOX */}
+                      <div className="bg-gray-900/60 rounded-lg p-2 max-h-24 overflow-y-auto custom-scrollbar">
+                        {group.emails.slice(0, 10).map((email, idx) => (
+                          <div key={`${email}-${idx}`} className="text-xs text-gray-300 font-mono py-0.5 truncate border-b border-gray-800 last:border-0">
+                            {email}
+                          </div>
+                        ))}
+                        {group.emails.length > 10 && (
+                          <div className="text-[10px] text-gray-500 text-center pt-1 font-mono">
+                            + {group.emails.length - 10} more emails in this product category
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              /* --- VIEW 3: INDUSTRY SECTOR GROUPS --- */
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {filteredIndustryGroups.map((group) => (
                   <div
                     key={group.industry}
-                    className="bg-gray-800/50 border border-gray-700 rounded-xl p-4 hover:border-gray-600 transition-colors"
+                    className="bg-gray-800/50 border border-gray-700 rounded-xl p-4 hover:border-gray-600 transition-colors flex flex-col justify-between"
                   >
-                    <div className="flex justify-between items-start mb-3">
-                      <div className="flex items-center gap-2.5">
-                        <div className="bg-gray-900/70 p-2 rounded-lg">
-                          {getIndustryIcon(group.industry)}
+                    <div>
+                      <div className="flex justify-between items-start gap-2 mb-3">
+                        <div className="flex items-center gap-2.5">
+                          <div className="bg-gray-900/70 p-2 rounded-lg">
+                            {getIndustryIcon(group.industry)}
+                          </div>
+                          <div>
+                            <h3 className="font-bold text-white text-sm">{group.industry}</h3>
+                            <span className="text-xs text-gray-400">
+                              {group.companies.length} companies •{' '}
+                              <span className="text-purple-300 font-semibold">{group.emails.length}</span> emails
+                            </span>
+                          </div>
                         </div>
-                        <div>
-                          <h3 className="font-bold text-white text-sm">{group.industry}</h3>
-                          <span className="text-xs text-gray-400">
-                            {group.companies.length} companies • {group.emails.length} emails
-                          </span>
+
+                        {/* Sector Quick Export actions */}
+                        <div className="flex items-center gap-1">
+                          <button
+                            onClick={() => handleCopyEmails(group.emails, `sec-${group.industry}`, group.industry)}
+                            className="px-2 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-200 text-xs font-medium transition flex items-center gap-1"
+                            title="Copy all emails in this sector"
+                          >
+                            {copiedId === `sec-${group.industry}` ? (
+                              <>
+                                <CheckIcon className="w-3.5 h-3.5 text-emerald-400" />
+                                <span className="text-emerald-400">Copied</span>
+                              </>
+                            ) : (
+                              <>
+                                <ClipboardIcon className="w-3.5 h-3.5" />
+                                <span>Copy</span>
+                              </>
+                            )}
+                          </button>
+
+                          <button
+                            onClick={() => handleExportSingleIndustry(group, 'txt')}
+                            className="px-2 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-200 text-xs font-medium transition flex items-center gap-1"
+                            title="Export sector emails as TXT"
+                          >
+                            <ArrowDownTrayIcon className="w-3.5 h-3.5" />
+                            <span>TXT</span>
+                          </button>
+
+                          <button
+                            onClick={() => handleExportSingleIndustry(group, 'csv')}
+                            className="px-2 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-200 text-xs font-medium transition flex items-center gap-1"
+                            title="Export sector contacts as CSV"
+                          >
+                            <ArrowDownTrayIcon className="w-3.5 h-3.5" />
+                            <span>CSV</span>
+                          </button>
                         </div>
+                      </div>
+
+                      {/* COMPANIES LIST IN THIS SECTOR */}
+                      <div className="space-y-1.5 mb-3 max-h-36 overflow-y-auto custom-scrollbar pr-1">
+                        {group.companies.map(c => (
+                          <div
+                            key={c.domain}
+                            onClick={() => setSelectedCompanyForModal(c)}
+                            className="flex items-center justify-between p-1.5 bg-gray-900/40 hover:bg-gray-900/80 rounded-lg cursor-pointer border border-transparent hover:border-purple-500/30 transition text-xs"
+                          >
+                            <div className="flex items-center gap-2 truncate">
+                              <span className="font-medium text-gray-200 truncate">{c.companyName}</span>
+                              <span className="text-[10px] text-gray-500 font-mono">({c.domain})</span>
+                            </div>
+                            <div className="flex items-center gap-2 shrink-0 ml-2">
+                              {c.productCategory && (
+                                <span className="text-[10px] text-pink-300 font-medium truncate max-w-[120px]">
+                                  {c.productCategory}
+                                </span>
+                              )}
+                              <span className="text-[10px] text-purple-300 font-mono">
+                                {c.emails.length} {c.emails.length === 1 ? 'email' : 'emails'}
+                              </span>
+                            </div>
+                          </div>
+                        ))}
                       </div>
                     </div>
 
-                    {/* COMPANIES LIST IN THIS SECTOR */}
-                    <div className="space-y-1.5 mb-3 max-h-36 overflow-y-auto custom-scrollbar pr-1">
-                      {group.companies.map(c => (
-                        <div
-                          key={c.domain}
-                          onClick={() => setSelectedCompanyForModal(c)}
-                          className="flex items-center justify-between p-1.5 bg-gray-900/40 hover:bg-gray-900/80 rounded-lg cursor-pointer border border-transparent hover:border-purple-500/30 transition text-xs"
-                        >
-                          <div className="flex items-center gap-2 truncate">
-                            <span className="font-medium text-gray-200 truncate">{c.companyName}</span>
-                            <span className="text-[10px] text-gray-500 font-mono">({c.domain})</span>
-                          </div>
-                          <span className="text-[10px] text-purple-300 font-mono shrink-0 ml-2">
-                            {c.emails.length} {c.emails.length === 1 ? 'email' : 'emails'}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-
                     {/* EMAILS LIST FOR SECTOR */}
-                    <div className="bg-gray-900/60 rounded-lg p-2 max-h-28 overflow-y-auto custom-scrollbar">
-                      {group.emails.map((email, idx) => (
+                    <div className="bg-gray-900/60 rounded-lg p-2 max-h-24 overflow-y-auto custom-scrollbar">
+                      {group.emails.slice(0, 10).map((email, idx) => (
                         <div key={`${email}-${idx}`} className="text-xs text-gray-300 font-mono py-0.5 truncate border-b border-gray-800 last:border-0">
                           {email}
                         </div>
                       ))}
+                      {group.emails.length > 10 && (
+                        <div className="text-[10px] text-gray-500 text-center pt-1 font-mono">
+                          + {group.emails.length - 10} more emails in this sector
+                        </div>
+                      )}
                     </div>
                   </div>
                 ))}

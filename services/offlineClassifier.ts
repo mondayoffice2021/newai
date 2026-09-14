@@ -99,26 +99,202 @@ export const DOMAIN_LOCATION_HINTS: Array<{ pattern: RegExp; country: string }> 
     { pattern: /(?:^|[-.])(?:california|texas|florida|newyork|chicago|usa)(?:[-.]|$)/i, country: 'United States' }
 ];
 
-// Keyword dictionary for offline industry detection
+// Known enterprise domain to industry mapping for 100% precision
+export const GLOBAL_CORPORATE_INDUSTRIES: Record<string, { industry: string; subCategory: string; companyName: string }> = {
+    // Automotive
+    'toyota.com': { industry: 'Automotive', subCategory: 'Automotive OEM & Mobility', companyName: 'Toyota Motor' },
+    'ford.com': { industry: 'Automotive', subCategory: 'Automotive Manufacturing', companyName: 'Ford' },
+    'gm.com': { industry: 'Automotive', subCategory: 'Automotive Manufacturing', companyName: 'General Motors' },
+    'bmw.com': { industry: 'Automotive', subCategory: 'Luxury Vehicles & Motorcycles', companyName: 'BMW Group' },
+    'volkswagen.com': { industry: 'Automotive', subCategory: 'Automotive Group & EV', companyName: 'Volkswagen Group' },
+    'mercedes-benz.com': { industry: 'Automotive', subCategory: 'Luxury Automotive & Commercial', companyName: 'Mercedes-Benz' },
+    'honda.com': { industry: 'Automotive', subCategory: 'Automotive & Power Equipment', companyName: 'Honda' },
+    'hyundai.com': { industry: 'Automotive', subCategory: 'Automotive Manufacturing', companyName: 'Hyundai' },
+    'tesla.com': { industry: 'Automotive', subCategory: 'Electric Vehicles & Clean Energy', companyName: 'Tesla' },
+    'stellantis.com': { industry: 'Automotive', subCategory: 'Multinational Automotive OEM', companyName: 'Stellantis' },
+    'continental.com': { industry: 'Automotive', subCategory: 'Tires & Automotive Parts Tier 1', companyName: 'Continental' },
+    'valeo.com': { industry: 'Automotive', subCategory: 'Automotive Systems & Components', companyName: 'Valeo' },
+    'denso.com': { industry: 'Automotive', subCategory: 'Automotive Components OEM', companyName: 'Denso' },
+
+    // Manufacturing & Heavy Industry
+    'caterpillar.com': { industry: 'Manufacturing', subCategory: 'Heavy Equipment & Machinery', companyName: 'Caterpillar' },
+    'cat.com': { industry: 'Manufacturing', subCategory: 'Heavy Machinery & Mining Equipment', companyName: 'Caterpillar' },
+    'deere.com': { industry: 'Manufacturing', subCategory: 'Agricultural & Turf Machinery', companyName: 'John Deere' },
+    'komatsu.com': { industry: 'Manufacturing', subCategory: 'Construction & Mining Equipment', companyName: 'Komatsu' },
+    'siemens.com': { industry: 'Manufacturing', subCategory: 'Industrial Automation & Digital Enterprise', companyName: 'Siemens' },
+    'bosch.com': { industry: 'Manufacturing', subCategory: 'Industrial Technology & Automotive Systems', companyName: 'Bosch' },
+    'ge.com': { industry: 'Manufacturing', subCategory: 'Industrial Aerospace & Energy', companyName: 'General Electric' },
+    '3m.com': { industry: 'Manufacturing', subCategory: 'Industrial Adhesives & Materials', companyName: '3M' },
+    'abb.com': { industry: 'Manufacturing', subCategory: 'Electrification & Industrial Automation', companyName: 'ABB' },
+    'honeywell.com': { industry: 'Manufacturing', subCategory: 'Aerospace & Building Technologies', companyName: 'Honeywell' },
+    'schneider-electric.com': { industry: 'Energy', subCategory: 'Energy Management & Automation', companyName: 'Schneider Electric' },
+    'mitsubishielectric.com': { industry: 'Manufacturing', subCategory: 'Industrial Automation & Electronics', companyName: 'Mitsubishi Electric' },
+
+    // Healthcare & Pharmaceuticals
+    'pfizer.com': { industry: 'Healthcare', subCategory: 'Biopharmaceuticals & Vaccines', companyName: 'Pfizer' },
+    'novartis.com': { industry: 'Healthcare', subCategory: 'Innovative Medicines & Oncology', companyName: 'Novartis' },
+    'roche.com': { industry: 'Healthcare', subCategory: 'Biotechnology & Diagnostics', companyName: 'Roche' },
+    'jnj.com': { industry: 'Healthcare', subCategory: 'Medical Devices & Pharmaceuticals', companyName: 'Johnson & Johnson' },
+    'merck.com': { industry: 'Healthcare', subCategory: 'Global Biopharmaceuticals', companyName: 'Merck' },
+    'astrazeneca.com': { industry: 'Healthcare', subCategory: 'Biopharmaceuticals & Oncology', companyName: 'AstraZeneca' },
+    'sanofi.com': { industry: 'Healthcare', subCategory: 'Pharmaceuticals & Vaccines', companyName: 'Sanofi' },
+    'gsk.com': { industry: 'Healthcare', subCategory: 'Biopharma & Vaccines', companyName: 'GSK' },
+    'abbvie.com': { industry: 'Healthcare', subCategory: 'Biopharmaceutical Therapeutics', companyName: 'AbbVie' },
+    'bayer.com': { industry: 'Healthcare', subCategory: 'Pharmaceuticals & Consumer Health', companyName: 'Bayer' },
+    'medtronic.com': { industry: 'Healthcare', subCategory: 'Medical Devices & HealthTech', companyName: 'Medtronic' },
+    'thermofisher.com': { industry: 'Healthcare', subCategory: 'Life Sciences & Laboratory Instrumentation', companyName: 'Thermo Fisher Scientific' },
+
+    // Aerospace & Defense
+    'boeing.com': { industry: 'Manufacturing', subCategory: 'Commercial Aviation & Defense', companyName: 'Boeing' },
+    'airbus.com': { industry: 'Manufacturing', subCategory: 'Aerospace & Commercial Aircraft', companyName: 'Airbus' },
+    'lockheedmartin.com': { industry: 'Manufacturing', subCategory: 'Aerospace & Defense Systems', companyName: 'Lockheed Martin' },
+    'northropgrumman.com': { industry: 'Manufacturing', subCategory: 'Aerospace & Defense Technology', companyName: 'Northrop Grumman' },
+    'rtx.com': { industry: 'Manufacturing', subCategory: 'Aerospace & Defense Solutions', companyName: 'Raytheon Technologies (RTX)' },
+
+    // Logistics & Shipping
+    'dhl.com': { industry: 'Logistics', subCategory: 'Global Express & Freight Forwarding', companyName: 'DHL' },
+    'fedex.com': { industry: 'Logistics', subCategory: 'Express Courier & Supply Chain', companyName: 'FedEx' },
+    'ups.com': { industry: 'Logistics', subCategory: 'Parcel Delivery & Supply Chain', companyName: 'UPS' },
+    'maersk.com': { industry: 'Logistics', subCategory: 'Container Shipping & Ocean Freight', companyName: 'A.P. Moller - Maersk' },
+    'kuehne-nagel.com': { industry: 'Logistics', subCategory: 'Global Freight Forwarding & 3PL', companyName: 'Kuehne + Nagel' },
+    'dbschenker.com': { industry: 'Logistics', subCategory: 'Freight Logistics & Supply Chain', companyName: 'DB Schenker' },
+
+    // Chemicals & Materials
+    'basf.com': { industry: 'Manufacturing', subCategory: 'Specialty Chemicals & Materials', companyName: 'BASF' },
+    'dow.com': { industry: 'Manufacturing', subCategory: 'Materials Science & Plastics', companyName: 'Dow' },
+    'dupont.com': { industry: 'Manufacturing', subCategory: 'Industrial Polymers & Specialty Materials', companyName: 'DuPont' },
+    'lyondellbasell.com': { industry: 'Manufacturing', subCategory: 'Plastics, Chemicals & Refining', companyName: 'LyondellBasell' },
+
+    // Energy & Utilities
+    'shell.com': { industry: 'Energy', subCategory: 'Global Energy & Petrochemicals', companyName: 'Shell' },
+    'bp.com': { industry: 'Energy', subCategory: 'Energy & Transition Fuels', companyName: 'BP' },
+    'exxonmobil.com': { industry: 'Energy', subCategory: 'Petroleum Exploration & Refining', companyName: 'ExxonMobil' },
+    'totalenergies.com': { industry: 'Energy', subCategory: 'Multi-Energy & Renewable Power', companyName: 'TotalEnergies' },
+    'chevron.com': { industry: 'Energy', subCategory: 'Energy & Petrochemicals', companyName: 'Chevron' },
+    'enel.com': { industry: 'Energy', subCategory: 'Renewable Power & Utilities', companyName: 'Enel' },
+
+    // Finance & Banking
+    'jpmorganchase.com': { industry: 'Finance', subCategory: 'Investment Banking & Financial Services', companyName: 'JPMorgan Chase' },
+    'bankofamerica.com': { industry: 'Finance', subCategory: 'Retail Banking & Wealth Management', companyName: 'Bank of America' },
+    'goldmansachs.com': { industry: 'Finance', subCategory: 'Global Investment Banking & Securities', companyName: 'Goldman Sachs' },
+    'morganstanley.com': { industry: 'Finance', subCategory: 'Investment Management & Advisory', companyName: 'Morgan Stanley' },
+    'citigroup.com': { industry: 'Finance', subCategory: 'Institutional Banking & Wealth', companyName: 'Citigroup' },
+    'hsbc.com': { industry: 'Finance', subCategory: 'International Banking & Finance', companyName: 'HSBC' },
+    'visa.com': { industry: 'Finance', subCategory: 'Digital Payments Network', companyName: 'Visa' },
+    'mastercard.com': { industry: 'Finance', subCategory: 'Global Payment Technology', companyName: 'Mastercard' },
+    'stripe.com': { industry: 'Finance', subCategory: 'Fintech & Payment Infrastructure', companyName: 'Stripe' },
+
+    // Food & Beverage / Agribusiness
+    'nestle.com': { industry: 'Food & Beverage', subCategory: 'Packaged Foods & Beverages', companyName: 'Nestlé' },
+    'pepsico.com': { industry: 'Food & Beverage', subCategory: 'Beverages & Snack Foods', companyName: 'PepsiCo' },
+    'coca-cola.com': { industry: 'Food & Beverage', subCategory: 'Global Beverage Manufacturing', companyName: 'The Coca-Cola Company' },
+    'unilever.com': { industry: 'Food & Beverage', subCategory: 'Consumer Goods & Nutrition', companyName: 'Unilever' },
+    'danone.com': { industry: 'Food & Beverage', subCategory: 'Dairy, Plant-Based & Specialized Nutrition', companyName: 'Danone' },
+    'cargill.com': { industry: 'Agriculture', subCategory: 'Agribusiness & Food Ingredients', companyName: 'Cargill' },
+
+    // Technology & Cloud
+    'google.com': { industry: 'Technology', subCategory: 'Search, Cloud & AI Systems', companyName: 'Google' },
+    'microsoft.com': { industry: 'Technology', subCategory: 'Enterprise Software, Cloud & AI', companyName: 'Microsoft' },
+    'apple.com': { industry: 'Technology', subCategory: 'Consumer Electronics & Software', companyName: 'Apple' },
+    'amazon.com': { industry: 'E-commerce', subCategory: 'E-Commerce & Cloud Infrastructure', companyName: 'Amazon' },
+    'meta.com': { industry: 'Technology', subCategory: 'Social Platforms & AI Infrastructure', companyName: 'Meta' },
+    'salesforce.com': { industry: 'Technology', subCategory: 'Enterprise CRM & Cloud Applications', companyName: 'Salesforce' },
+    'oracle.com': { industry: 'Technology', subCategory: 'Enterprise Database & Cloud Infrastructure', companyName: 'Oracle' },
+    'sap.com': { industry: 'Technology', subCategory: 'Enterprise Resource Planning (ERP)', companyName: 'SAP' },
+    'ibm.com': { industry: 'Technology', subCategory: 'Enterprise Hybrid Cloud & AI Solutions', companyName: 'IBM' },
+    'cisco.com': { industry: 'Technology', subCategory: 'Networking Hardware & Cybersecurity', companyName: 'Cisco' }
+};
+
+// Keyword dictionary for offline industry detection with exact word boundaries and domain roots
 export const INDUSTRY_KEYWORDS: Record<string, string[]> = {
-    'Technology': ['tech', 'soft', 'app', 'data', 'cloud', 'cyber', 'io', 'ai', 'sys', 'net', 'web', 'code', 'dev', 'lab', 'digital', 'saas', 'bot', 'it-', 'software', 'compute', 'network', 'security', 'crypto', 'blockchain', 'hosting'],
-    'Healthcare': ['health', 'care', 'med', 'clinic', 'pharma', 'bio', 'dr', 'hosp', 'dental', 'wellness', 'therap', 'surg', 'nurse', 'md', 'physio', 'optical', 'vet', 'animal', 'patient', 'hospital', 'medical'],
-    'Finance': ['bank', 'invest', 'capital', 'fund', 'wealth', 'pay', 'coin', 'crypto', 'finance', 'insure', 'trading', 'asset', 'advis', 'stock', 'equity', 'audit', 'tax', 'account', 'credit', 'loan', 'mortgage', 'broker'],
-    'E-commerce': ['shop', 'store', 'buy', 'mart', 'retail', 'sale', 'cart', 'deal', 'market', 'gift', 'fashion', 'boutique', 'mall', 'clothing', 'apparel', 'jewelry', 'shoes'],
-    'Education': ['edu', 'school', 'univ', 'learn', 'teach', 'academy', 'student', 'class', 'course', 'college', 'training', 'tutor', 'degree', 'campus', 'study'],
-    'Real Estate': ['realty', 'estate', 'home', 'house', 'prop', 'land', 'apt', 'condo', 'build', 'rent', 'lease', 'living', 'residence', 'mortgage'],
-    'Legal': ['law', 'legal', 'attorney', 'justice', 'firm', 'advocate', 'solicitor', 'jurist', 'court', 'litig', 'counsel', 'barrister'],
-    'Travel': ['travel', 'tour', 'trip', 'fly', 'hotel', 'resort', 'booking', 'vacation', 'flight', 'airline', 'cruise', 'stay', 'inn', 'hostel', 'adventure'],
-    'Food & Beverage': ['food', 'cafe', 'rest', 'bar', 'drink', 'eat', 'chef', 'kitchen', 'pizza', 'burger', 'wine', 'brew', 'bakery', 'coffee', 'catering', 'organic', 'meat', 'dairy'],
-    'Construction': ['build', 'construct', 'contractor', 'roof', 'plumb', 'electric', 'eng', 'civil', 'archit', 'design', 'renov', 'paint', 'solar', 'hvac', 'steel', 'concrete'],
-    'Automotive': ['auto', 'car', 'motor', 'drive', 'wheel', 'fix', 'garage', 'repair', 'trans', 'vehicle', 'truck', 'tire', 'parts', 'rental', 'racing'],
-    'Marketing': ['agency', 'media', 'market', 'social', 'seo', 'ads', 'brand', 'creative', 'design', 'promo', 'publicity', 'comm', 'press', 'video', 'photo'],
-    'Manufacturing': ['factory', 'industr', 'manufact', 'plant', 'steel', 'metal', 'machin', 'tool', 'equip', 'supply', 'prod', 'mill', 'forge', 'chem', 'plastic'],
-    'Logistics': ['ship', 'logist', 'cargo', 'freight', 'delivery', 'courier', 'warehous', 'supply', 'chain', 'transport', 'express', 'mail', 'fleet'],
-    'Energy': ['power', 'energy', 'oil', 'gas', 'solar', 'wind', 'fuel', 'electric', 'utility', 'grid', 'renew', 'petro', 'nuclear', 'water'],
-    'Consulting': ['consult', 'advis', 'strat', 'coach', 'expert', 'solut', 'partner', 'group', 'mgmt', 'manage', 'talent', 'hr', 'recruit'],
-    'Agriculture': ['farm', 'agri', 'crop', 'land', 'garden', 'plant', 'seed', 'harvest', 'forest', 'nature', 'green', 'eco', 'soil', 'livestock'],
-    'Media': ['news', 'press', 'mag', 'journal', 'tv', 'radio', 'broadcast', 'film', 'movie', 'music', 'sound', 'ent', 'game', 'play', 'stream']
+    'Manufacturing': [
+        'manufacturing', 'manufacturer', 'machining', 'stamping', 'casting', 'foundry', 'fabrication', 
+        'tooling', 'welding', 'assembly', 'industrial', 'plant', 'factory', 'producer', 'precision', 
+        'components', 'metalwork', 'hydraulics', 'pneumatics', 'sheetmetal', 'cnc', 'die', 'molding', 
+        'extrusion', 'steel', 'metals', 'alloys', 'polymers', 'plastics', 'heavy machinery', 'hardware', 
+        'oem', 'tier1', 'tier-1', 'subcontractor', 'machinery', 'equipment'
+    ],
+    'Automotive': [
+        'automotive', 'vehicle', 'powertrain', 'chassis', 'transmission', 'drivetrain', 'autoparts', 
+        'aftermarket', 'dealership', 'fleet', 'motor', 'motors', 'truck', 'trucks', 'cars', 'tires', 
+        'brakes', 'suspension', 'ev', 'electric vehicle', 'hybrid', 'racing', 'garage', 'auto repair'
+    ],
+    'Healthcare': [
+        'healthcare', 'health', 'medical', 'medicine', 'pharma', 'pharmaceutical', 'pharmaceuticals', 
+        'biotech', 'biotechnology', 'biopharma', 'clinical', 'hospital', 'clinic', 'diagnostics', 
+        'therapeutics', 'oncology', 'surgical', 'dental', 'pathology', 'radiology', 'orthopedic', 
+        'doctor', 'physician', 'patient', 'wellness', 'laboratory', 'lifesciences'
+    ],
+    'Technology': [
+        'software', 'saas', 'cloud', 'cybersecurity', 'artificial intelligence', 'machine learning', 
+        'computing', 'developer', 'devops', 'database', 'platform', 'it solutions', 'network', 
+        'networking', 'api', 'infrastructure', 'fintech', 'mobile app', 'firmware', 'tech', 
+        'systems', 'infotech', 'digital solutions', 'data analytics'
+    ],
+    'Finance': [
+        'banking', 'bank', 'finances', 'finance', 'financial', 'investment', 'investments', 'capital', 
+        'wealth', 'asset management', 'private equity', 'venture capital', 'fintech', 'payments', 
+        'insurance', 'underwriting', 'insurtech', 'credit', 'lending', 'mortgage', 'accounting', 
+        'audit', 'brokerage', 'trading', 'fund', 'advisory'
+    ],
+    'Construction': [
+        'construction', 'contractor', 'general contractor', 'builder', 'builders', 'civil engineering', 
+        'architectural', 'architecture', 'roofing', 'masonry', 'structural', 'hvac', 'plumbing', 
+        'electrical contractor', 'concrete', 'infrastructure', 'excavation', 'scaffolding', 'renovation'
+    ],
+    'Logistics': [
+        'logistics', 'freight', 'cargo', 'shipping', 'warehousing', 'warehouse', 'courier', 'express', 
+        'supply chain', 'intermodal', 'freight forwarding', '3pl', 'transport', 'transportation', 
+        'trucking', 'carrier', 'delivery', 'fleet management', 'customs broker'
+    ],
+    'Energy': [
+        'energy', 'renewable', 'solar', 'wind power', 'photovoltaic', 'petroleum', 'oil and gas', 
+        'drilling', 'utilities', 'utility', 'electric grid', 'substation', 'power plant', 'lng', 
+        'clean energy', 'biofuel', 'nuclear', 'geothermal', 'pipeline'
+    ],
+    'Food & Beverage': [
+        'food', 'beverage', 'drinks', 'brewery', 'brewing', 'distillery', 'winery', 'baking', 
+        'bakery', 'confectionery', 'dairy', 'meat processing', 'snack', 'organic food', 'catering', 
+        'restaurant', 'food service', 'ingredients', 'nutrition', 'culinary'
+    ],
+    'E-commerce': [
+        'ecommerce', 'e-commerce', 'retail', 'online store', 'shopping', 'storefront', 'marketplace', 
+        'boutique', 'apparel', 'clothing', 'footwear', 'merchandise', 'consumer goods', 'd2c', 
+        'direct-to-consumer', 'fashion brand'
+    ],
+    'Real Estate': [
+        'real estate', 'realty', 'property', 'properties', 'commercial real estate', 'residential', 
+        'leasing', 'tenants', 'apartments', 'condominiums', 'brokerage', 'realtor', 'property management', 
+        'land acquisition'
+    ],
+    'Agriculture': [
+        'agriculture', 'agri', 'farming', 'farm', 'agribusiness', 'crops', 'harvest', 'irrigation', 
+        'seeds', 'fertilizer', 'livestock', 'poultry', 'grain', 'forestry', 'horticulture', 'aquaculture'
+    ],
+    'Legal': [
+        'law firm', 'legal', 'attorney', 'attorneys', 'lawyer', 'lawyers', 'litigation', 'counsel', 
+        'barristers', 'solicitors', 'jurist', 'intellectual property', 'patent attorney', 'corporate law'
+    ],
+    'Education': [
+        'education', 'university', 'college', 'academy', 'school', 'curriculum', 'learning', 'training', 
+        'e-learning', 'campus', 'degree', 'faculty', 'students', 'vocational'
+    ],
+    'Marketing': [
+        'marketing', 'advertising', 'digital agency', 'public relations', 'branding', 'creative agency', 
+        'seo agency', 'media agency', 'campaigns', 'communications'
+    ],
+    'Consulting': [
+        'consulting', 'management consulting', 'advisory', 'strategy consulting', 'business advisory', 
+        'operations consulting', 'hr consulting', 'executive search'
+    ],
+    'Media': [
+        'media', 'publishing', 'broadcasting', 'journalism', 'television', 'radio', 'news agency', 
+        'film production', 'entertainment', 'gaming', 'video games', 'streaming'
+    ],
+    'Travel': [
+        'travel', 'hospitality', 'hotel', 'resort', 'tourism', 'airlines', 'airline', 'flight', 
+        'cruise line', 'vacation', 'tour operator', 'booking'
+    ]
 };
 
 export const classifyCountryOffline = (domain: string): string | null => {
@@ -151,7 +327,6 @@ export const classifyCountryOffline = (domain: string): string | null => {
 
     // 5. Well-known global commercial TLD defaults
     if (ext === 'com' || ext === 'net' || ext === 'org') {
-        // Many generic .com domains are US-headquartered or International
         return null;
     }
 
@@ -159,16 +334,42 @@ export const classifyCountryOffline = (domain: string): string | null => {
 };
 
 export const classifyIndustryOffline = (domain: string): string | null => {
-    const lowerDomain = domain.toLowerCase();
+    const clean = domain.toLowerCase().trim().replace(/^www\./, '');
     
-    let bestMatch: { industry: string; length: number } | null = null;
+    // 1. Check known enterprise corporate registry first
+    if (GLOBAL_CORPORATE_INDUSTRIES[clean]) {
+        return GLOBAL_CORPORATE_INDUSTRIES[clean].industry;
+    }
+
+    // 2. Extract root domain name without TLD
+    const root = clean.replace(/\.[a-z]{2,}(\.[a-z]{2,})?$/i, '');
+
+    // Split root into tokens (e.g. "acme-machining" -> ["acme", "machining"], "precisionmetals" -> tokens)
+    const tokens = root.split(/[-_.]+/).filter(Boolean);
+
+    let bestMatch: { industry: string; score: number } | null = null;
 
     for (const [industry, keywords] of Object.entries(INDUSTRY_KEYWORDS)) {
         for (const keyword of keywords) {
-            if (lowerDomain.includes(keyword)) {
-                // Prioritize the longest keyword match to be more specific
-                if (!bestMatch || keyword.length > bestMatch.length) {
-                    bestMatch = { industry, length: keyword.length };
+            const cleanKw = keyword.toLowerCase().trim();
+            // Don't match super short fragments like 'dr' or 'car' inside longer unrelated words
+            if (cleanKw.length < 4) continue;
+
+            // Direct token match (e.g. "machining" in ["acme", "machining"])
+            if (tokens.includes(cleanKw)) {
+                return industry;
+            }
+
+            // Substring match in root only if keyword is >= 5 characters or starts the root
+            if (root.startsWith(cleanKw) || root.endsWith(cleanKw) || root.includes(`-${cleanKw}`) || root.includes(`${cleanKw}-`)) {
+                const score = cleanKw.length * 2;
+                if (!bestMatch || score > bestMatch.score) {
+                    bestMatch = { industry, score };
+                }
+            } else if (cleanKw.length >= 6 && root.includes(cleanKw)) {
+                const score = cleanKw.length;
+                if (!bestMatch || score > bestMatch.score) {
+                    bestMatch = { industry, score };
                 }
             }
         }
