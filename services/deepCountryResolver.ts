@@ -330,11 +330,20 @@ async function checkDnsMxCountry(domain: string): Promise<DomainCountryResolutio
   return null;
 }
 
+// Circuit breaker to prevent repeated 429 rate-limit errors when Gemini API free quota is exhausted
+let aiQuotaCooldownUntil = 0;
+
 /**
  * AI Grounding with Gemini 3.8 Flash & Google Search (Optional fallback)
  */
 async function aiCountryReasoning(domains: string[], apiKey?: string): Promise<Map<string, DomainCountryResolution>> {
   const results = new Map<string, DomainCountryResolution>();
+  
+  // If quota was exhausted previously, skip AI calls during cooldown window
+  if (Date.now() < aiQuotaCooldownUntil) {
+    return results;
+  }
+
   const effectiveKey = apiKey || process.env.GEMINI_API_KEY;
   if (!effectiveKey || domains.length === 0) return results;
 
@@ -379,7 +388,22 @@ Only use recognized sovereign country names (e.g. "United States", "Germany", "U
       }
     }
   } catch (err: any) {
-    console.warn("[Deep Country AI Grounding] Notice:", err.message);
+    const errMsg = (err?.message || '').toLowerCase();
+    const isQuotaError = 
+      errMsg.includes('429') || 
+      errMsg.includes('quota') || 
+      errMsg.includes('resource_exhausted') || 
+      errMsg.includes('rate_limit') ||
+      err?.status === 'RESOURCE_EXHAUSTED' ||
+      err?.code === 429;
+
+    if (isQuotaError) {
+      // Enter a 30-minute cooldown to prevent spamming quota-exhausted keys
+      aiQuotaCooldownUntil = Date.now() + 30 * 60 * 1000;
+      console.log("[Deep Country Engine] Gemini API free quota limit reached; safely relying on live website contact scraping & search engine grounding.");
+    } else {
+      console.log("[Deep Country AI Grounding] Notice: Fallback search grounding active.");
+    }
   }
 
   return results;
@@ -497,9 +521,9 @@ export async function resolveBatchDomainsDeeply(
     results.push(...chunkResults);
   }
 
-  // For domains still 'Unknown', if Gemini API key exists, do a quick batch AI lookup
+  // For domains still 'Unknown', if Gemini API key exists and quota is not in cooldown, do a quick batch AI lookup
   const stillUnknown = results.filter(r => r.country === 'Unknown').map(r => r.domain);
-  if (stillUnknown.length > 0 && (apiKey || process.env.GEMINI_API_KEY)) {
+  if (stillUnknown.length > 0 && (apiKey || process.env.GEMINI_API_KEY) && Date.now() >= aiQuotaCooldownUntil) {
     try {
       const aiResults = await aiCountryReasoning(stillUnknown.slice(0, 30), apiKey);
       for (let i = 0; i < results.length; i++) {

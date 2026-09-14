@@ -757,6 +757,9 @@ export function analyzeMetaLocally(meta: RawDomainMeta): CompanyIntelligenceResu
   };
 }
 
+// Quota circuit breaker to prevent repeated 429 errors when Gemini API key limit is reached
+let enricherAiCooldownUntil = 0;
+
 /**
  * AI-Enhanced Synthesis via Gemini 3.8 Flash with Google Search Grounding
  */
@@ -764,6 +767,10 @@ async function enhanceWithGemini(
   rawMetas: RawDomainMeta[],
   customApiKey?: string
 ): Promise<Map<string, CompanyIntelligenceResult>> {
+  if (Date.now() < enricherAiCooldownUntil) {
+    return new Map();
+  }
+
   const apiKey = (customApiKey && customApiKey.trim()) || process.env.GEMINI_API_KEY;
   const results = new Map<string, CompanyIntelligenceResult>();
   if (!apiKey || rawMetas.length === 0) return results;
@@ -874,7 +881,21 @@ Return your output STRICTLY as a JSON array wrapped in a markdown code block:
       }
     }
   } catch (err: any) {
-    console.warn("[Gemini Grounded Intelligence] Notice:", err?.message || err);
+    const errMsg = (err?.message || '').toLowerCase();
+    const isQuotaError = 
+      errMsg.includes('429') || 
+      errMsg.includes('quota') || 
+      errMsg.includes('resource_exhausted') || 
+      errMsg.includes('rate_limit') ||
+      err?.status === 'RESOURCE_EXHAUSTED' ||
+      err?.code === 429;
+
+    if (isQuotaError) {
+      enricherAiCooldownUntil = Date.now() + 30 * 60 * 1000;
+      console.log("[Domain Intelligence] Gemini API quota limit reached; safely using high-fidelity web meta & search heuristic extraction.");
+    } else {
+      console.log("[Domain Intelligence] Notice: Fallback search extraction active.");
+    }
   }
 
   return results;
