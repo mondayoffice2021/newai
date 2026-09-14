@@ -36,6 +36,8 @@ import PlayIcon from './components/icons/PlayIcon';
 import PauseIcon from './components/icons/PauseIcon';
 import StopIcon from './components/icons/StopIcon';
 import ArrowPathIcon from './components/icons/ArrowPathIcon';
+import ArrowsPointingOutIcon from './components/icons/ArrowsPointingOutIcon';
+import ArrowsPointingInIcon from './components/icons/ArrowsPointingInIcon';
 import { ScreenWakeLockIndicator } from './components/ScreenWakeLockIndicator';
 import { useActiveWakeLock } from './hooks/useWakeLock';
 
@@ -83,6 +85,88 @@ const App: React.FC = () => {
   
   // Settings State
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+
+  // Full Screen & Reduction State
+  const [isFullScreen, setIsFullScreen] = useState<boolean>(false);
+
+  const handleEnterFullScreen = async () => {
+    try {
+      const docEl = document.documentElement as any;
+      if (docEl.requestFullscreen) {
+        await docEl.requestFullscreen();
+      } else if (docEl.webkitRequestFullscreen) {
+        await docEl.webkitRequestFullscreen();
+      } else if (docEl.mozRequestFullScreen) {
+        await docEl.mozRequestFullScreen();
+      } else if (docEl.msRequestFullscreen) {
+        await docEl.msRequestFullscreen();
+      }
+      setIsFullScreen(true);
+      showToast("Full Screen enabled - Covering entire system");
+    } catch (err) {
+      console.warn("Fullscreen request error/blocked:", err);
+      // Fallback to full viewport mode
+      setIsFullScreen(true);
+      showToast("Covering entire viewport (Full Screen mode)");
+    }
+  };
+
+  const handleExitFullScreen = async () => {
+    try {
+      const doc = document as any;
+      if (doc.fullscreenElement || doc.webkitFullscreenElement || doc.mozFullScreenElement || doc.msFullscreenElement) {
+        if (doc.exitFullscreen) {
+          await doc.exitFullscreen();
+        } else if (doc.webkitExitFullscreen) {
+          await doc.webkitExitFullscreen();
+        } else if (doc.mozCancelFullScreen) {
+          await doc.mozCancelFullScreen();
+        } else if (doc.msExitFullscreen) {
+          await doc.msExitFullscreen();
+        }
+      }
+      setIsFullScreen(false);
+      showToast("Screen reduced to normal view");
+    } catch (err) {
+      console.warn("Fullscreen exit error:", err);
+      setIsFullScreen(false);
+      showToast("Screen reduced to normal view");
+    }
+  };
+
+  // Synchronize fullscreen state with browser/keyboard triggers (Esc / F11 / browser controls)
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      const doc = document as any;
+      const isFs = Boolean(
+        doc.fullscreenElement || 
+        doc.webkitFullscreenElement || 
+        doc.mozFullScreenElement || 
+        doc.msFullscreenElement
+      );
+      setIsFullScreen(isFs);
+    };
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && isFullScreen) {
+        handleExitFullScreen();
+      }
+    };
+
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
+    document.addEventListener('mozfullscreenchange', handleFullscreenChange);
+    document.addEventListener('MSFullscreenChange', handleFullscreenChange);
+    window.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+      document.removeEventListener('webkitfullscreenchange', handleFullscreenChange);
+      document.removeEventListener('mozfullscreenchange', handleFullscreenChange);
+      document.removeEventListener('MSFullscreenChange', handleFullscreenChange);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isFullScreen]);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const stopSearchRef = useRef(false);
@@ -969,11 +1053,44 @@ const App: React.FC = () => {
         onSave={handleSaveApiKey} 
       />
 
-      <div className="min-h-screen w-full bg-gray-900 text-white p-4 sm:p-6 lg:p-8 font-sans">
-        <div className="max-w-[98%] mx-auto">
+      <div className={`min-h-screen w-full bg-gray-900 text-white font-sans transition-all duration-200 ${isFullScreen ? 'p-2 sm:p-4' : 'p-4 sm:p-6 lg:p-8'}`}>
+        <div className={`mx-auto transition-all duration-200 ${isFullScreen ? 'w-full px-1' : 'max-w-[98%]'}`}>
           <header className="text-center mb-8 relative">
-            <div className="absolute right-0 top-0 flex items-center gap-2">
+            <div className="flex items-center justify-end gap-2 mb-4 sm:mb-0 sm:absolute sm:right-0 sm:top-0">
                 <ScreenWakeLockIndicator showToast={showToast} />
+
+                {/* BUTTON 1: MAKE FULL SCREEN TO COVER WHOLE SYSTEM */}
+                <button 
+                    type="button"
+                    onClick={handleEnterFullScreen}
+                    disabled={isFullScreen}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all border shadow-sm ${
+                      isFullScreen
+                        ? 'bg-gray-800 text-gray-500 border-gray-700/60 cursor-not-allowed opacity-50'
+                        : 'bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white border-blue-400/40 shadow-blue-500/20 active:scale-95'
+                    }`}
+                    title="Make it Full Screen to cover the whole system and monitor"
+                >
+                    <ArrowsPointingOutIcon className="w-3.5 h-3.5" />
+                    <span>Full Screen</span>
+                </button>
+
+                {/* BUTTON 2: REDUCE IT */}
+                <button 
+                    type="button"
+                    onClick={handleExitFullScreen}
+                    disabled={!isFullScreen}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all border shadow-sm ${
+                      !isFullScreen
+                        ? 'bg-gray-800 text-gray-500 border-gray-700/60 cursor-not-allowed opacity-50'
+                        : 'bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-500 hover:to-orange-500 text-white border-amber-400/50 shadow-amber-500/20 ring-2 ring-amber-400/30 active:scale-95'
+                    }`}
+                    title="Reduce screen back to normal window size (Esc)"
+                >
+                    <ArrowsPointingInIcon className="w-3.5 h-3.5" />
+                    <span>Reduce</span>
+                </button>
+
                 <button 
                     onClick={() => setIsSettingsOpen(true)}
                     className="p-2 rounded-full text-gray-400 hover:text-white hover:bg-gray-800 transition border border-transparent hover:border-gray-700"
@@ -1172,6 +1289,27 @@ const App: React.FC = () => {
               </div>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* FLOATING QUICK REDUCE BUTTON WHEN FULL SCREEN IS ACTIVE */}
+      {isFullScreen && (
+        <div className="fixed bottom-5 right-5 z-[9999] flex items-center gap-2.5 bg-gray-900/95 backdrop-blur-md border border-amber-500/50 text-white px-3.5 py-2 rounded-xl shadow-2xl shadow-black/80 transition-all animate-in fade-in slide-in-from-bottom-3 duration-300">
+          <span className="flex h-2.5 w-2.5 relative">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span>
+            <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-blue-500"></span>
+          </span>
+          <span className="text-xs text-gray-200 font-semibold tracking-tight hidden sm:inline">Full Screen Mode</span>
+          <button
+            type="button"
+            onClick={handleExitFullScreen}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-500 hover:to-orange-500 text-white text-xs font-bold rounded-lg transition shadow-md hover:scale-105 active:scale-95 border border-amber-400/40"
+            title="Reduce screen back to normal window size (Esc)"
+          >
+            <ArrowsPointingInIcon className="w-3.5 h-3.5" />
+            <span>Reduce Screen</span>
+            <kbd className="hidden sm:inline-block px-1.5 py-0.5 text-[10px] bg-amber-950/80 rounded border border-amber-400/40 font-mono text-amber-200 ml-1">Esc</kbd>
+          </button>
         </div>
       )}
     </>
